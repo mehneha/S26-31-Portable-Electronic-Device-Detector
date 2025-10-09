@@ -18,8 +18,10 @@ signals received by the USRP device, allowing users to monitor and analyze the
 signal characteristics in a user-friendly way.
 
 Example Usage:
-python rx_spectrum_to_pychart.py --args addr=192.168.10.2 --freq 2.4e9 --rate 1e6
-                                 --gain 10 --nsamps 100000 --ref 0 --dyn 60
+                                 
+TESTING: python rx_spectrum_to_pyplot.py --args "type=b200" --freq 2.42e9 --rate 45e6 --gain 40 --ant TX/RX
+
+SIMULATION MODE: python rx_spectrum_to_pyplot.py --sim 99e6 101e6 2.4201e9 --freq 100e6 --rate 12e6
 """
 
 import argparse
@@ -224,7 +226,7 @@ def main():
     btn_wifi = Button(ax_wifi, 'WiFi')
     btn_bt   = Button(ax_bt, 'Bluetooth')
 
-    btn_cell.on_clicked(lambda event: set_freq(900e6))
+    btn_cell.on_clicked(lambda event: set_freq(875e6))
     btn_wifi.on_clicked(lambda event: set_freq(2.42e9))
     btn_bt.on_clicked(lambda event: set_freq(2.4e9))
 
