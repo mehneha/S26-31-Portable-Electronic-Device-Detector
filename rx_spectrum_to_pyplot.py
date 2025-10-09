@@ -28,6 +28,7 @@ import time
 try:
     import matplotlib.pyplot as plt
     import matplotlib.style as mplstyle
+    from matplotlib.widgets import Button
     from matplotlib.ticker import EngFormatter
 except ImportError as e:
     print("Error: matplotlib is required to run this example.")
@@ -108,7 +109,13 @@ def parse_args():
         default="TX/RX",
         help="Select RX antenna (TX/RX or RX2) [default = TX/RX].",
     )
-
+    parser.add_argument(
+        "--sim",
+        nargs="*",
+        type=float,
+        help="Run without USRP, optionally specify signal frequencies in Hz."
+    )
+    
     return parser.parse_args()
 
 
@@ -139,19 +146,35 @@ def main():
     # 5. Repeat Steps 3-4 until user interrupts the program.
     """
     args = parse_args()
-    usrp = uhd.usrp.MultiUSRP(args.args)
+    if args.sim:
+        usrp = None
+        sim_freqs = args.sim if len(args.sim) > 0 else [args.freq]
+        print("Running in simulation mode — no USRP device will be used.")
+    else:
+        try:
+            usrp = uhd.usrp.MultiUSRP(args.args)
+        except Exception as e:
+            print("No USRP found. Use --sim to run without hardware.")
+            raise e
+
 
     # Set antenna
-    usrp.set_rx_antenna(args.ant, args.channel)
-    print("Available RX antennas:", usrp.get_rx_antennas(args.channel))
-    print("Using RX antenna:", usrp.get_rx_antenna(args.channel))
+    if args.sim:
+        rx_rate = args.rate
+        rx_freq = args.freq
+        print("Simulation mode active: using dummy signal source.")
+    else:
+        # Set antenna
+        usrp.set_rx_antenna(args.ant, args.channel)
+        print("Available RX antennas:", usrp.get_rx_antennas(args.channel))
+        print("Using RX antenna:", usrp.get_rx_antenna(args.channel))
 
-    # Set the USRP rate, freq, and gain
-    usrp.set_rx_rate(args.rate, args.channel)
-    usrp.set_rx_freq(uhd.types.TuneRequest(args.freq), args.channel)
-    usrp.set_rx_gain(args.gain, args.channel)
-    rx_rate = usrp.get_rx_rate()
-    rx_freq = usrp.get_rx_freq(0)
+        # Set the USRP rate, freq, and gain
+        usrp.set_rx_rate(args.rate, args.channel)
+        usrp.set_rx_freq(uhd.types.TuneRequest(args.freq), args.channel)
+        usrp.set_rx_gain(args.gain, args.channel)
+        rx_rate = usrp.get_rx_rate()
+        rx_freq = usrp.get_rx_freq(0)
 
     # Plotting initialization.
     mplstyle.use("fast")  # Use a fast style for matplotlib
@@ -182,6 +205,29 @@ def main():
     ax_signal_plot.set_ylabel("Power Spectral Density (dB)")
     ax_signal_plot.xaxis.set_major_formatter(formatter)
 
+    def set_freq(new_freq):
+        nonlocal rx_freq
+        rx_freq = new_freq
+        if not args.sim:
+            usrp.set_rx_freq(uhd.types.TuneRequest(rx_freq), args.channel)
+        ax_signal_plot.title.set_text(
+            f"Channel:{args.channel} operating at "
+            f"{round(rx_rate/1e6, 2)} MSps tuned to "
+            f"{round(rx_freq/1e9, 2)} GHz."
+        )
+        fig.canvas.draw_idle()
+
+    ax_cell = plt.axes([0.15, 0.9, 0.1, 0.05])
+    ax_wifi = plt.axes([0.27, 0.9, 0.1, 0.05])
+    ax_bt   = plt.axes([0.39, 0.9, 0.1, 0.05])
+    btn_cell = Button(ax_cell, 'Cellular')
+    btn_wifi = Button(ax_wifi, 'WiFi')
+    btn_bt   = Button(ax_bt, 'Bluetooth')
+
+    btn_cell.on_clicked(lambda event: set_freq(900e6))
+    btn_wifi.on_clicked(lambda event: set_freq(2.42e9))
+    btn_bt.on_clicked(lambda event: set_freq(2.4e9))
+
     fig.tight_layout()
     height, width = plt.get_current_fig_manager().canvas.get_width_height()
 
@@ -197,16 +243,23 @@ def main():
     st_args.channels = [args.channel]
 
     # Create Rx streamer to receive samples
-    metadata = uhd.types.RXMetadata()
-    streamer = usrp.get_rx_stream(st_args)
-    buffer_samps = streamer.get_max_num_samps()
-    print(f"Recv Buffer size set to: {buffer_samps} samples.")
-    recv_buffer = np.zeros((1, buffer_samps), dtype=np.complex64)
+    if args.sim:
+        streamer = None
+        metadata = None
+        buffer_samps = num_samps
+        recv_buffer = None
+        print("Simulation mode: skipping USRP streamer setup.")
+    else:
+        metadata = uhd.types.RXMetadata()
+        streamer = usrp.get_rx_stream(st_args)
+        buffer_samps = streamer.get_max_num_samps()
+        print(f"Recv Buffer size set to: {buffer_samps} samples.")
+        recv_buffer = np.zeros((1, buffer_samps), dtype=np.complex64)
 
-    # Configure the stream command to stream number of samples and done
-    stream_cmd = uhd.types.StreamCMD(uhd.types.StreamMode.num_done)
-    stream_cmd.stream_now = True
-    stream_cmd.num_samps = buffer_samps
+        stream_cmd = uhd.types.StreamCMD(uhd.types.StreamMode.num_done)
+        stream_cmd.stream_now = True
+        stream_cmd.num_samps = buffer_samps
+
 
     print(
         "Beginning Streaming...\n"
@@ -216,18 +269,26 @@ def main():
     try:
         first_run = True
         while True:
-
-            # Receive the samples
-            recv_samps = 0
-            while recv_samps < num_samps:
-                streamer.issue_stream_cmd(stream_cmd)
-                samps = streamer.recv(recv_buffer, metadata)
-                if metadata.error_code != uhd.types.RXMetadataErrorCode.none:
-                    print(metadata.strerror())
-                if samps:
-                    real_samps = min(num_samps - recv_samps, samps)
-                    samples[:, recv_samps : recv_samps + real_samps] = recv_buffer[:, 0:real_samps]
-                    recv_samps += real_samps
+            if args.sim is not None:
+                t = np.arange(num_samps) / args.rate
+                samples = np.zeros(num_samps, dtype=np.complex64)
+                for f in sim_freqs:
+                    df = f - rx_freq
+                    if abs(df) <= rx_rate / 2:
+                        samples += np.exp(2j * np.pi * df * t)
+                samples += 0.3 * (np.random.randn(num_samps) + 1j * np.random.randn(num_samps))
+                samples = np.expand_dims(samples, axis=0)
+            else:
+                recv_samps = 0
+                while recv_samps < num_samps:
+                    streamer.issue_stream_cmd(stream_cmd)
+                    samps = streamer.recv(recv_buffer, metadata)
+                    if metadata.error_code != uhd.types.RXMetadataErrorCode.none:
+                        print(metadata.strerror())
+                    if samps:
+                        real_samps = min(num_samps - recv_samps, samps)
+                        samples[:, recv_samps : recv_samps + real_samps] = recv_buffer[:, 0:real_samps]
+                        recv_samps += real_samps
 
             # Get power spectral density
             len_samples = len(samples[args.channel])
@@ -244,12 +305,10 @@ def main():
             ln_signal_plot.set_ydata(ydata)
 
             # Rescale axes.
-            if first_run:
-                ax_signal_plot.relim()
-                ax_signal_plot.autoscale_view()
-                # Update the window
-                fig.canvas.draw()
-                first_run = False
+            ax_signal_plot.set_xlim(xdata[0], xdata[-1])
+            ax_signal_plot.relim()
+            ax_signal_plot.autoscale_view(scalex=False, scaley=True)
+            fig.canvas.draw_idle()
 
             # Update the window
             fig.canvas.flush_events()
