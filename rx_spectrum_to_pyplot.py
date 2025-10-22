@@ -26,6 +26,7 @@ SIMULATION MODE: python rx_spectrum_to_pyplot.py --sim 99e6 101e6 2.4201e9 --fre
 
 import argparse
 import time
+import serial
 
 try:
     import matplotlib.pyplot as plt
@@ -234,7 +235,7 @@ def main():
     height, width = plt.get_current_fig_manager().canvas.get_width_height()
 
     # Update every update_interval seconds.
-    update_interval = 0.2
+    update_interval = 0.02
 
     # Create the buffer to receive samples
     num_samps = max(args.nsamps, width)
@@ -269,7 +270,14 @@ def main():
     )
 
     try:
-        first_run = True
+        logging_timer = 0
+        threshold = -30
+        try:
+            arduino = serial.Serial('COM5', 9600)
+            time.sleep(2)
+        except Exception:
+            arduino = None
+            print("No Arduino detected — running without serial output.")
         while True:
             if args.sim is not None:
                 t = np.arange(num_samps) / args.rate
@@ -318,11 +326,25 @@ def main():
             # check if plot window has been closed by user
             if not plt.fignum_exists(fig.number):
                 break
+               
+            if time.time() - logging_timer > 10:
+                peak_val = np.argmax(ydata)
+                if ydata[peak_val] > threshold:
+                    if arduino:
+                        arduino.write(b"RED\n")
+                    print(f"[{time.strftime('%H:%M:%S')}] Detected {xdata[peak_val]/1e6:.3f} MHz ({ydata[peak_val]:.1f} dB)")
+                else:
+                    if arduino:
+                        arduino.write(b"GREEN\n")
+                    print(f"[{time.strftime('%H:%M:%S')}]")
+                logging_timer = time.time()
 
             time.sleep(update_interval)
     except KeyboardInterrupt:
         pass
 
+    if arduino:
+        arduino.close()
     plt.close(fig)
 
 
