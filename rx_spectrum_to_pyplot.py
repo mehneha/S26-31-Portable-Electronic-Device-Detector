@@ -30,6 +30,7 @@ import serial
 import csv
 from datetime import datetime
 from typing import Optional, Tuple
+import sys
 
 try:
     import matplotlib.pyplot as plt
@@ -43,6 +44,19 @@ except ImportError as e:
 
 import numpy as np
 import uhd
+
+# Fixed Welch defaults (GUI does not expose these).
+WELCH_NPERSEG_DEFAULT = 4096
+WELCH_NOVERLAP_DEFAULT = 2048
+
+# Optional Tkinter GUI for argument selection.
+try:
+    import tkinter as tk
+    from tkinter import ttk, messagebox
+except Exception:
+    tk = None
+    ttk = None
+    messagebox = None
 
 # Optional Excel writer (pandas + openpyxl). Falls back to CSV if not present.
 try:
@@ -59,11 +73,186 @@ except ImportError:
     welch = None
 
 
+def launch_gui(defaults: argparse.Namespace) -> Optional[argparse.Namespace]:
+    if tk is None:
+        print("Error: Tkinter is required for the GUI. Install Tkinter or use CLI args.")
+        return None
+
+    root = tk.Tk()
+    root.title("RX Spectrum Settings")
+    root.resizable(False, False)
+
+    result: Optional[argparse.Namespace] = None
+
+    def add_row(parent, label, var, row, width=24):
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="e", padx=6, pady=4)
+        entry = ttk.Entry(parent, textvariable=var, width=width)
+        entry.grid(row=row, column=1, sticky="w", padx=6, pady=4)
+        return entry
+
+    container = ttk.Frame(root, padding=10)
+    container.grid(row=0, column=0, sticky="nsew")
+
+    # Device settings
+    device_frame = ttk.LabelFrame(container, text="Device")
+    device_frame.grid(row=0, column=0, sticky="ew", padx=6, pady=6)
+
+    args_var = tk.StringVar(value=defaults.args or "")
+    add_row(device_frame, "USRP args", args_var, 0, width=40)
+
+    ant_var = tk.StringVar(value=defaults.ant or "TX/RX")
+    ttk.Label(device_frame, text="Antenna").grid(row=1, column=0, sticky="e", padx=6, pady=4)
+    ant_combo = ttk.Combobox(device_frame, textvariable=ant_var, values=["TX/RX", "RX2"], width=37)
+    ant_combo.grid(row=1, column=1, sticky="w", padx=6, pady=4)
+    ant_combo.configure(state="normal")
+
+    # Signal settings
+    signal_frame = ttk.LabelFrame(container, text="Signal")
+    signal_frame.grid(row=1, column=0, sticky="ew", padx=6, pady=6)
+
+    freq_var = tk.StringVar(value="" if defaults.freq is None else str(defaults.freq))
+    rate_var = tk.StringVar(value=str(defaults.rate))
+    gain_var = tk.StringVar(value=str(defaults.gain))
+    channel_var = tk.StringVar(value=str(defaults.channel))
+    nsamps_var = tk.StringVar(value=str(defaults.nsamps))
+
+    add_row(signal_frame, "Center freq (Hz)", freq_var, 0)
+    add_row(signal_frame, "Sample rate (S/s)", rate_var, 1)
+    add_row(signal_frame, "Gain (dB)", gain_var, 2)
+    add_row(signal_frame, "Channel", channel_var, 3)
+    add_row(signal_frame, "Samples per update", nsamps_var, 4)
+
+    # Detection settings
+    detect_frame = ttk.LabelFrame(container, text="Detection")
+    detect_frame.grid(row=2, column=0, sticky="ew", padx=6, pady=6)
+
+    thresh_var = tk.StringVar(value=str(defaults.thresh_offset))
+    detect_bw_var = tk.StringVar(value=str(defaults.detect_bw))
+    add_row(detect_frame, "Threshold offset (dB)", thresh_var, 0)
+    add_row(detect_frame, "Detect bandwidth (Hz)", detect_bw_var, 1)
+
+    # Simulation settings
+    sim_frame = ttk.LabelFrame(container, text="Simulation")
+    sim_frame.grid(row=3, column=0, sticky="ew", padx=6, pady=6)
+
+    sim_enabled_var = tk.BooleanVar(value=defaults.sim is not None)
+
+    ttk.Checkbutton(sim_frame, text="Enable simulation mode", variable=sim_enabled_var).grid(
+        row=0, column=0, columnspan=2, sticky="w", padx=6, pady=4
+    )
+    sim_entries_frame = ttk.Frame(sim_frame)
+    sim_entries_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=6, pady=4)
+
+    sim_entries: list[tk.StringVar] = []
+
+    def add_sim_entry(value: str = ""):
+        var = tk.StringVar(value=value)
+        row = len(sim_entries)
+        entry = ttk.Entry(sim_entries_frame, textvariable=var, width=40)
+        entry.grid(row=row, column=0, sticky="w", pady=2)
+        sim_entries.append(var)
+
+    if defaults.sim:
+        for val in defaults.sim:
+            add_sim_entry(str(val))
+    else:
+        add_sim_entry("")
+
+    def on_add_sim_tone():
+        add_sim_entry("")
+
+    ttk.Button(sim_frame, text="Add Sim Tone", command=on_add_sim_tone).grid(
+        row=2, column=0, sticky="w", padx=6, pady=4
+    )
+
+    def parse_required_float(name, value):
+        try:
+            return float(value)
+        except ValueError:
+            raise ValueError(f"{name} must be a number.")
+
+    def parse_required_int(name, value):
+        try:
+            return int(value)
+        except ValueError:
+            raise ValueError(f"{name} must be an integer.")
+
+    def parse_sim_entries():
+        values = []
+        for var in sim_entries:
+            text = var.get().strip()
+            if not text:
+                continue
+            try:
+                values.append(float(text))
+            except ValueError:
+                raise ValueError("Each sim tone must be a number.")
+        return values
+
+    def on_submit():
+        nonlocal result
+        try:
+            freq = parse_required_float("Center freq", freq_var.get())
+            rate = parse_required_float("Sample rate", rate_var.get())
+            gain = parse_required_int("Gain", gain_var.get())
+            channel = parse_required_int("Channel", channel_var.get())
+            nsamps = parse_required_int("Samples per update", nsamps_var.get())
+            dyn = defaults.dyn
+            ref = defaults.ref
+            thresh_offset = parse_required_float("Threshold offset", thresh_var.get())
+            detect_bw = parse_required_float("Detect bandwidth", detect_bw_var.get())
+            welch_nperseg = WELCH_NPERSEG_DEFAULT
+            welch_noverlap = WELCH_NOVERLAP_DEFAULT
+
+            sim_values = None
+            if sim_enabled_var.get():
+                sim_values = parse_sim_entries()
+
+            result = argparse.Namespace(
+                args=args_var.get(),
+                freq=freq,
+                rate=rate,
+                gain=gain,
+                channel=channel,
+                nsamps=nsamps,
+                dyn=dyn,
+                ref=ref,
+                ant=ant_var.get(),
+                sim=sim_values,
+                thresh_offset=thresh_offset,
+                detect_bw=detect_bw,
+                welch_nperseg=welch_nperseg,
+                welch_noverlap=welch_noverlap,
+                gui=True,
+            )
+        except ValueError as exc:
+            messagebox.showerror("Invalid input", str(exc))
+            return
+
+        root.destroy()
+
+    def on_cancel():
+        root.destroy()
+
+    btn_frame = ttk.Frame(container)
+    btn_frame.grid(row=4, column=0, sticky="e", padx=6, pady=6)
+    ttk.Button(btn_frame, text="Start", command=on_submit).grid(row=0, column=0, padx=6)
+    ttk.Button(btn_frame, text="Cancel", command=on_cancel).grid(row=0, column=1, padx=6)
+
+    root.mainloop()
+    return result
+
+
 def parse_args():
-    """Parse the command line arguments."""
+    """Parse the command line arguments (or launch GUI)."""
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=__doc__,
+    )
+    parser.add_argument(
+        "--gui",
+        action="store_true",
+        help="Launch a GUI to set all options (CLI args still supported).",
     )
     parser.add_argument(
         "-a",
@@ -78,7 +267,7 @@ def parse_args():
         "-f",
         "--freq",
         type=float,
-        required=True,
+        default=None,
         help="specifies the center frequency in Hz [input is required].",
     )
     parser.add_argument(
@@ -151,17 +340,25 @@ def parse_args():
     parser.add_argument(
         "--welch-nperseg",
         type=int,
-        default=None,
-        help="Number of samples per segment for Welch's method. If None, uses nfft/4 [default = None]."
+        default=WELCH_NPERSEG_DEFAULT,
+        help="Number of samples per segment for Welch's method [default = 4096]."
     )
     parser.add_argument(
         "--welch-noverlap",
         type=int,
-        default=None,
-        help="Number of overlapping samples for Welch's method. If None, uses 50%% overlap [default = None]."
+        default=WELCH_NOVERLAP_DEFAULT,
+        help="Number of overlapping samples for Welch's method [default = 2048]."
     )
-    
-    return parser.parse_args()
+
+    args = parser.parse_args()
+
+    if args.gui or args.freq is None:
+        gui_args = launch_gui(args)
+        if gui_args is None:
+            sys.exit(0)
+        return gui_args
+
+    return args
 
 
 def psd(nfft: int, samples: np.ndarray) -> np.ndarray:
