@@ -35,6 +35,7 @@ import uhd
 # Fixed Welch defaults.
 WELCH_NPERSEG_DEFAULT = 4096
 WELCH_NOVERLAP_DEFAULT = 2048
+PLOT_MAX_POINTS = 3000
 
 # Optional Excel writer (pandas + openpyxl). Falls back to CSV if not present.
 try:
@@ -53,12 +54,18 @@ except ImportError:
 
 SWEEP_START_HZ = 650e6
 SWEEP_END_HZ = 5.5e9
-SWEEP_STEP_HZ = 50e6
+SWEEP_STEP_HZ = 40e6
 EXCLUDED_RANGES_HZ = [
     (1.0e9, 2.0e9),
     (3.0e9, 4.0e9),
     (4.0e9, 5.0e9),
 ]
+DEFAULT_USRP_ARGS = ""
+DEFAULT_CENTER_FREQ = SWEEP_START_HZ
+DEFAULT_SAMPLE_RATE = 40e6
+DEFAULT_CHANNEL = 0
+DEFAULT_NSAMPS = 100000
+DEFAULT_DETECT_BW = 2e6
 
 
 def build_sweep_plan() -> list[float]:
@@ -350,6 +357,7 @@ class SpectrumWorker(threading.Thread):
         self.latest = {"x": np.array([]), "y": np.array([]), "y_range": None, "title": ""}
         self.noise_floor = None
         self.rescale_pending = True
+        self.last_logged_step_token = None
         self.dlog = DetectionLogger(out_path="detected_devices.xlsx")
 
     def log(self, message: str) -> None:
@@ -541,6 +549,20 @@ class SpectrumWorker(threading.Thread):
 
                 ydata = 10 * np.log10(psd_welch + 1e-20)
                 xdata = freqs + rx_freq
+                # Replace center spike region with average of nearby band.
+                center_hz = rx_freq
+                inner_hz = 200e3
+                outer_hz = 300e3
+                center_mask = (xdata >= center_hz - inner_hz) & (xdata <= center_hz + inner_hz)
+                ring_mask = (
+                    (xdata >= center_hz - outer_hz) & (xdata <= center_hz - inner_hz)
+                ) | (
+                    (xdata >= center_hz + inner_hz) & (xdata <= center_hz + outer_hz)
+                )
+                if np.any(center_mask) and np.any(ring_mask):
+                    fill_value = float(np.mean(ydata[ring_mask]))
+                    ydata = ydata.copy()
+                    ydata[center_mask] = fill_value
 
                 if self.noise_floor is None:
                     self.noise_floor = float(np.percentile(ydata, 30.0))
@@ -564,6 +586,10 @@ class SpectrumWorker(threading.Thread):
                     self.latest["title"] = refresh_title()
 
                 if time.time() - logging_timer > args["detect_interval"]:
+                    step_token = (current_range_idx, last_range_switch_time)
+                    if step_token == self.last_logged_step_token:
+                        logging_timer = time.time()
+                        continue
                     self.noise_floor = calculate_noise_floor_welch(
                         samples[args["channel"]],
                         sample_rate=rx_rate,
@@ -584,6 +610,7 @@ class SpectrumWorker(threading.Thread):
                         )
 
                     detections_found = False
+                    detections = []
                     for peak_idx in peak_indices:
                         peak_freq_hz = float(xdata[peak_idx])
 
@@ -596,30 +623,37 @@ class SpectrumWorker(threading.Thread):
                             bw_6db = estimate_peak_bandwidth_hz(xdata, ydata, peak_idx, drop_db=6.0)
                             band = classify_band(peak_freq_hz, bw_hz=bw_6db)
 
-                            self.log(
-                                f"Detected {peak_freq_hz / 1e6:.3f} MHz "
-                                f"({max_power_in_range:.1f} dB, noise floor: {self.noise_floor:.1f} dB) - {band}"
-                            )
-
                             ts = datetime.now()
                             row = {
                                 "timestamp": ts.isoformat(timespec="seconds"),
-                                "peak_freq_hz": float(peak_freq_hz),
+                                "peak_freq_ghz": round(float(peak_freq_hz) / 1e9, 5),
                                 "peak_power_db": round(float(max_power_in_range), 2),
                                 "detection": band,
-                                "center_freq_hz": float(rx_freq),
-                                "sample_rate_sps": float(rx_rate),
+                                "center_freq_ghz": round(float(rx_freq) / 1e9, 5),
                                 "rx_gain_db": float(current_gain),
-                                "channel": int(args["channel"]),
                             }
+                            detections.append((max_power_in_range, row))
+
+                    if detections:
+                        detections.sort(key=lambda item: item[1]["peak_freq_ghz"])
+                        selected = [detections[0]]
+                        if len(detections) > 1:
+                            selected.append(detections[-1])
+
+                        for power, row in selected:
+                            self.log(
+                                f"Detected {row['peak_freq_ghz']:.4f} GHz "
+                                f"({power:.1f} dB, noise floor: {self.noise_floor:.1f} dB) - {row['detection']}"
+                            )
+                            ts = datetime.fromisoformat(row["timestamp"])
                             self.dlog.add(
                                 ts=ts,
-                                peak_freq_hz=peak_freq_hz,
-                                peak_power_db=max_power_in_range,
-                                band=band,
-                                center_freq_hz=rx_freq,
+                                peak_freq_hz=row["peak_freq_ghz"] * 1e9,
+                                peak_power_db=power,
+                                band=row["detection"],
+                                center_freq_hz=row["center_freq_ghz"] * 1e9,
                                 sample_rate_sps=rx_rate,
-                                gain_db=current_gain,
+                                gain_db=row["rx_gain_db"],
                                 channel=args["channel"],
                             )
                             self.log_detection(row)
@@ -630,6 +664,7 @@ class SpectrumWorker(threading.Thread):
                             f"threshold: {dynamic_threshold:.1f} dB)"
                         )
 
+                    self.last_logged_step_token = step_token
                     logging_timer = time.time()
 
                 time.sleep(0.02)
@@ -682,29 +717,17 @@ app.layout = html.Div(
                 html.Div(
                     [
                         html.H4("Settings"),
-                        html.Label("USRP args"),
-                        dcc.Input(id="usrp-args", type="text", value="", style={"width": "100%"}),
                         html.Label("Antenna"),
                         dcc.Dropdown(id="ant", options=[{"label": "TX/RX", "value": "TX/RX"}, {"label": "RX2", "value": "RX2"}], value="TX/RX"),
-                        html.Label("Center freq (Hz)"),
-                        dcc.Input(id="freq", type="text", value="2.42e9", style={"width": "100%"}),
-                        html.Label("Sample rate (S/s)"),
-                        dcc.Input(id="rate", type="text", value="50e6", style={"width": "100%"}),
                         html.Label("Gain (dB)"),
                         dcc.Input(id="gain", type="text", value="10", style={"width": "100%"}),
-                        html.Label("Channel"),
-                        dcc.Input(id="channel", type="text", value="0", style={"width": "100%"}),
-                        html.Label("Samples per update"),
-                        dcc.Input(id="nsamps", type="text", value="100000", style={"width": "100%"}),
                         html.Hr(),
                         html.Label("Threshold offset (dB)"),
                         dcc.Input(id="thresh-offset", type="text", value="10.0", style={"width": "100%"}),
-                        html.Label("Detect bandwidth (Hz)"),
-                        dcc.Input(id="detect-bw", type="text", value="2000000", style={"width": "100%"}),
                         html.Label("Scan interval (s)"),
-                        dcc.Input(id="scan-interval", type="text", value="3", style={"width": "100%"}),
+                        dcc.Input(id="scan-interval", type="text", value="20", style={"width": "100%"}),
                         html.Label("Detection interval (s)"),
-                        dcc.Input(id="detect-interval", type="text", value="10", style={"width": "100%"}),
+                        dcc.Input(id="detect-interval", type="text", value="0.2", style={"width": "100%"}),
                         html.Hr(),
                         dcc.Checklist(
                             id="sim-enabled",
@@ -733,13 +756,11 @@ app.layout = html.Div(
                             id="detections-table",
                             columns=[
                                 {"name": "Timestamp", "id": "timestamp"},
-                                {"name": "Peak freq (Hz)", "id": "peak_freq_hz"},
+                                {"name": "Peak freq (GHz)", "id": "peak_freq_ghz"},
                                 {"name": "Peak power (dB)", "id": "peak_power_db"},
                                 {"name": "Detection", "id": "detection"},
-                                {"name": "Center freq (Hz)", "id": "center_freq_hz"},
-                                {"name": "Sample rate (S/s)", "id": "sample_rate_sps"},
+                                {"name": "Center freq (GHz)", "id": "center_freq_ghz"},
                                 {"name": "RX gain (dB)", "id": "rx_gain_db"},
-                                {"name": "Channel", "id": "channel"},
                             ],
                             data=[],
                             page_size=10,
@@ -762,15 +783,9 @@ app.layout = html.Div(
     Output("error", "children"),
     Input("start-btn", "n_clicks"),
     Input("stop-btn", "n_clicks"),
-    State("usrp-args", "value"),
     State("ant", "value"),
-    State("freq", "value"),
-    State("rate", "value"),
     State("gain", "value"),
-    State("channel", "value"),
-    State("nsamps", "value"),
     State("thresh-offset", "value"),
-    State("detect-bw", "value"),
     State("scan-interval", "value"),
     State("detect-interval", "value"),
     State("sim-enabled", "value"),
@@ -780,15 +795,9 @@ app.layout = html.Div(
 def on_control(
     start_clicks,
     stop_clicks,
-    usrp_args,
     ant,
-    freq,
-    rate,
     gain,
-    channel,
-    nsamps,
     thresh_offset,
-    detect_bw,
     scan_interval,
     detect_interval,
     sim_enabled_values,
@@ -810,15 +819,15 @@ def on_control(
 
     try:
         settings = {
-            "usrp_args": usrp_args or "",
+            "usrp_args": DEFAULT_USRP_ARGS,
             "ant": ant or "TX/RX",
-            "freq": parse_float(freq, "Center freq"),
-            "rate": parse_float(rate, "Sample rate"),
+            "freq": DEFAULT_CENTER_FREQ,
+            "rate": DEFAULT_SAMPLE_RATE,
             "gain": parse_int(gain, "Gain"),
-            "channel": parse_int(channel, "Channel"),
-            "nsamps": parse_int(nsamps, "Samples per update"),
+            "channel": DEFAULT_CHANNEL,
+            "nsamps": DEFAULT_NSAMPS,
             "thresh_offset": parse_float(thresh_offset, "Threshold offset"),
-            "detect_bw": parse_float(detect_bw, "Detect bandwidth"),
+            "detect_bw": DEFAULT_DETECT_BW,
             "scan_interval": parse_float(scan_interval, "Scan interval"),
             "detect_interval": parse_float(detect_interval, "Detection interval"),
             "sweep_plan": build_sweep_plan(),
@@ -859,11 +868,20 @@ def update_display(_tick):
         }
     else:
         latest = active_worker.get_latest()
+        x_plot = latest["x"]
+        y_plot = latest["y"]
+        if len(x_plot) > PLOT_MAX_POINTS:
+            step = max(1, len(x_plot) // PLOT_MAX_POINTS)
+            x_plot = x_plot[::step]
+            y_plot = y_plot[::step]
+
+        x_plot = x_plot / 1e9
+
         fig = {
             "data": [
                 {
-                    "x": latest["x"],
-                    "y": latest["y"],
+                    "x": x_plot,
+                    "y": y_plot,
                     "type": "scatter",
                     "mode": "lines",
                     "name": "Power Spectral Density",
@@ -871,13 +889,22 @@ def update_display(_tick):
             ],
             "layout": {
                 "title": latest["title"] or "Spectrum",
-                "xaxis": {"title": "Frequency (Hz)"},
-                "yaxis": {"title": "Power Spectral Density (dB)"},
-                "margin": {"l": 60, "r": 10, "t": 40, "b": 40},
-            },
+                "xaxis": {
+                    "title": {"text": "Frequency (GHz)", "standoff": 20},
+                    "tickformat": ".3f",
+                    "automargin": True,
+                },
+                "yaxis": {
+                    "title": {"text": "Power Spectral Density (dB)", "standoff": 15},
+                    "automargin": True,
+                },
+                "margin": {"l": 40, "r": 20, "t": 50, "b": 40},
+            }
         }
+
         if latest["y_range"] is not None:
             fig["layout"]["yaxis"]["range"] = latest["y_range"]
+            
 
     with detect_lock:
         table_rows = list(detect_buffer)
