@@ -27,6 +27,36 @@ from welch_utils import (
 )
 
 
+def _format_freq(freq_hz: float) -> str:
+    if freq_hz >= 1e9:
+        val = freq_hz / 1e9
+        text = f"{val:.3f}".rstrip("0").rstrip(".")
+        return f"{text} GHz"
+    val = freq_hz / 1e6
+    text = f"{val:.3f}".rstrip("0").rstrip(".")
+    return f"{text} MHz"
+
+
+def _apply_notch_band(
+    xdata: np.ndarray,
+    ydata: np.ndarray,
+    center_hz: float,
+    inner_hz: float,
+    outer_hz: float,
+) -> np.ndarray:
+    center_mask = (xdata >= center_hz - inner_hz) & (xdata <= center_hz + inner_hz)
+    ring_mask = (
+        (xdata >= center_hz - outer_hz) & (xdata <= center_hz - inner_hz)
+    ) | (
+        (xdata >= center_hz + inner_hz) & (xdata <= center_hz + outer_hz)
+    )
+    if np.any(center_mask) and np.any(ring_mask):
+        fill_value = float(np.mean(ydata[ring_mask]))
+        ydata = ydata.copy()
+        ydata[center_mask] = fill_value
+    return ydata
+
+
 class SpectrumWorker(threading.Thread):
     def __init__(
         self,
@@ -44,6 +74,9 @@ class SpectrumWorker(threading.Thread):
         self.noise_floor = None
         self.rescale_pending = True
         self.last_logged_step_token = None
+        self.manual_y_enabled = bool(settings.get("manual_y_enabled", False))
+        self.manual_y_min = settings.get("y_min")
+        self.manual_y_max = settings.get("y_max")
         self.status = {
             "arduino": "Not initialized",
             "last_signal": "",
@@ -86,19 +119,22 @@ class SpectrumWorker(threading.Thread):
         if args["sim_enabled"]:
             rx_rate = args["rate"]
             rx_freq = args["freq"]
-            current_gain = args["gain"]
+            gain_factor = float(args["gain"])
+            current_gain = gain_factor * (rx_freq / 1e9)
         else:
             usrp.set_rx_antenna(args["ant"], args["channel"])
 
             usrp.set_rx_rate(args["rate"], args["channel"])
             usrp.set_rx_freq(uhd.types.TuneRequest(args["freq"]), args["channel"])
-            usrp.set_rx_gain(args["gain"], args["channel"])
+            gain_factor = float(args["gain"])
+            current_gain = gain_factor * (rx_freq / 1e9)
+            usrp.set_rx_gain(current_gain, args["channel"])
             rx_rate = usrp.get_rx_rate()
             rx_freq = usrp.get_rx_freq(0)
             try:
                 current_gain = float(usrp.get_rx_gain(args["channel"]))
             except Exception:
-                current_gain = float(args["gain"])
+                current_gain = gain_factor * (rx_freq / 1e9)
 
         num_samps = max(args["nsamps"], 1024)
         samples = np.empty((1, num_samps), dtype=np.complex64)
@@ -136,7 +172,9 @@ class SpectrumWorker(threading.Thread):
             nonlocal rx_freq
             rx_freq = new_freq
             if not args["sim_enabled"]:
+                current_gain = gain_factor * (rx_freq / 1e9)
                 usrp.set_rx_freq(uhd.types.TuneRequest(rx_freq), args["channel"])
+                usrp.set_rx_gain(current_gain, args["channel"])
             self.rescale_pending = True
 
         current_range_idx = 0
@@ -211,22 +249,26 @@ class SpectrumWorker(threading.Thread):
                 center_hz = rx_freq
                 inner_hz = 200e3
                 outer_hz = 300e3
-                center_mask = (xdata >= center_hz - inner_hz) & (xdata <= center_hz + inner_hz)
-                ring_mask = (
-                    (xdata >= center_hz - outer_hz) & (xdata <= center_hz - inner_hz)
-                ) | (
-                    (xdata >= center_hz + inner_hz) & (xdata <= center_hz + outer_hz)
+                ydata = _apply_notch_band(xdata, ydata, center_hz, inner_hz, outer_hz)
+
+                spur_offset_hz = 10e6
+                spur_inner_hz = 20e3
+                spur_outer_hz = 30e3
+                ydata = _apply_notch_band(
+                    xdata, ydata, center_hz - spur_offset_hz, spur_inner_hz, spur_outer_hz
                 )
-                if np.any(center_mask) and np.any(ring_mask):
-                    fill_value = float(np.mean(ydata[ring_mask]))
-                    ydata = ydata.copy()
-                    ydata[center_mask] = fill_value
+                ydata = _apply_notch_band(
+                    xdata, ydata, center_hz + spur_offset_hz, spur_inner_hz, spur_outer_hz
+                )
 
                 if self.noise_floor is None:
                     self.noise_floor = float(np.percentile(ydata, 30.0))
 
                 y_range = None
-                if self.rescale_pending:
+                if self.manual_y_enabled and self.manual_y_min is not None and self.manual_y_max is not None:
+                    y_range = [float(self.manual_y_min), float(self.manual_y_max)]
+                    self.rescale_pending = False
+                elif self.rescale_pending:
                     y_max = float(np.max(ydata))
                     y_min = float(np.min(ydata))
                     if np.isfinite(y_max) and np.isfinite(y_min):
@@ -283,12 +325,16 @@ class SpectrumWorker(threading.Thread):
 
                             ts = datetime.now()
                             row = {
+                                "id": f"{ts.isoformat(timespec='seconds')}_{int(round(peak_freq_hz))}",
                                 "timestamp": ts.isoformat(timespec="seconds"),
+                                "peak_freq_label": _format_freq(peak_freq_hz),
                                 "peak_freq_ghz": round(float(peak_freq_hz) / 1e9, 5),
                                 "peak_power_db": round(float(max_power_in_range), 2),
                                 "detection": band,
+                                "center_freq_label": _format_freq(rx_freq),
                                 "center_freq_ghz": round(float(rx_freq) / 1e9, 5),
                                 "rx_gain_db": float(current_gain),
+                                "false_positive": False,
                             }
                             detections.append((max_power_in_range, row))
 

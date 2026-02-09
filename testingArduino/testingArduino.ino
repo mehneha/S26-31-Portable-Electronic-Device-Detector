@@ -1,7 +1,7 @@
-int redLED = 8;
-int greenLED = 9;
-int yellowLED = 10;
-int buzzer = 7;
+int redLED = 13;
+int greenLED = 5;
+int yellowLED = 9;
+int buzzer = 2;
 String input = "";
 
 void setup() {
