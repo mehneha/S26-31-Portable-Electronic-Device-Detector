@@ -126,11 +126,11 @@ class SpectrumWorker(threading.Thread):
 
             usrp.set_rx_rate(args["rate"], args["channel"])
             usrp.set_rx_freq(uhd.types.TuneRequest(args["freq"]), args["channel"])
+            rx_freq = usrp.get_rx_freq(0)
             gain_factor = float(args["gain"])
             current_gain = gain_factor * (rx_freq / 1e9)
             usrp.set_rx_gain(current_gain, args["channel"])
             rx_rate = usrp.get_rx_rate()
-            rx_freq = usrp.get_rx_freq(0)
             try:
                 current_gain = float(usrp.get_rx_gain(args["channel"]))
             except Exception:
@@ -157,7 +157,10 @@ class SpectrumWorker(threading.Thread):
             stream_cmd.stream_now = True
             stream_cmd.num_samps = buffer_samps
 
-        arduino, arduino_status = open_arduino()
+        if args.get("arduino_enabled", True):
+            arduino, arduino_status = open_arduino()
+        else:
+            arduino, arduino_status = None, "Disabled"
         with self.data_lock:
             self.status["arduino"] = arduino_status
 
@@ -169,7 +172,7 @@ class SpectrumWorker(threading.Thread):
             )
 
         def set_freq(new_freq):
-            nonlocal rx_freq
+            nonlocal rx_freq, current_gain
             rx_freq = new_freq
             if not args["sim_enabled"]:
                 current_gain = gain_factor * (rx_freq / 1e9)
@@ -300,7 +303,8 @@ class SpectrumWorker(threading.Thread):
                     dynamic_threshold = self.noise_floor + args["thresh_offset"]
 
                     min_peak_height = dynamic_threshold
-                    min_distance_samples = max(1, int(args["detect_bw"] / rx_rate * len_samples))
+                    # Temporarily disable minimum peak spacing so close peaks are not suppressed.
+                    min_distance_samples = 1
 
                     if HAS_SCIPY:
                         peak_indices, _ = find_peaks(ydata, height=min_peak_height, distance=min_distance_samples)

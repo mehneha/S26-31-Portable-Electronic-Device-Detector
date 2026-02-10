@@ -13,6 +13,7 @@ Run:
 import argparse
 import csv
 import io
+import os
 import threading
 from collections import deque
 from datetime import datetime
@@ -34,12 +35,12 @@ except Exception:
 
 # Fixed config.
 SWEEP_START_HZ = 650e6
-SWEEP_END_HZ = 6.0e9
+SWEEP_END_HZ = 2.0e9
 SWEEP_STEP_HZ = 40e6
 EXCLUDED_RANGES_HZ = [
-    (1.0e9, 1.85e9),
-    (3.0e9, 5.2e9),
-    (5.8e9, 6.0e9),
+    (2.0e9, 3.0e9),
+    (3.0e9, 4.8e9),
+    #(5.8e9, 6.0e9),
 ]
 DEFAULT_USRP_ARGS = ""
 DEFAULT_CENTER_FREQ = SWEEP_START_HZ
@@ -66,7 +67,10 @@ WIFI_SWEEP_FREQS = [
 BLUETOOTH_SWEEP_FREQS = [2.4e9]
 
 
-def build_sweep_plan(modes: list[str]) -> list[float]:
+def build_sweep_plan(modes: list[str], selected_freq_ghz: float | None = None) -> list[float]:
+    if "select" in modes and selected_freq_ghz is not None:
+        return [selected_freq_ghz * 1e9]
+
     if "all" in modes or not modes:
         freqs = []
         f = SWEEP_START_HZ
@@ -89,12 +93,6 @@ def build_sweep_plan(modes: list[str]) -> list[float]:
     if "bluetooth" in modes:
         freqs.extend(BLUETOOTH_SWEEP_FREQS)
 
-    return freqs
-    freqs = []
-    f = SWEEP_START_HZ
-    while f <= SWEEP_END_HZ + 1.0:
-        freqs.append(f)
-        f += SWEEP_STEP_HZ
     return freqs
 
 
@@ -174,9 +172,18 @@ app.layout = html.Div(
                                 html.Button("Cellular", id="scan-cellular-btn", n_clicks=0),
                                 html.Button("Bluetooth", id="scan-bt-btn", n_clicks=0, style={"marginLeft": "6px"}),
                                 html.Button("WiFi", id="scan-wifi-btn", n_clicks=0, style={"marginLeft": "6px"}),
+                                html.Button("Select", id="scan-select-btn", n_clicks=0, style={"marginLeft": "6px"}),
                                 html.Button("All", id="scan-all-btn", n_clicks=0, style={"marginLeft": "6px"}),
                             ],
                             style={"marginTop": "10px"},
+                        ),
+                        html.Div(
+                            id="selected-freq-container",
+                            children=[
+                                html.Label("Selected freq (GHz)"),
+                                dcc.Input(id="selected-freq-ghz", type="text", value="2.42", style={"width": "100%"}),
+                            ],
+                            style={"display": "none"},
                         ),
                         html.Div(
                             [
@@ -187,8 +194,7 @@ app.layout = html.Div(
                         ),
                         html.Div(
                             [
-                                html.Button("Export CSV", id="export-csv-btn", n_clicks=0),
-                                html.Button("Export Excel", id="export-xlsx-btn", n_clicks=0, style={"marginLeft": "10px"}),
+                                html.Button("Export Excel", id="export-xlsx-btn", n_clicks=0),
                                 html.Button("Clear Table", id="clear-table-btn", n_clicks=0, style={"marginLeft": "10px"}),
                             ],
                             style={"marginTop": "10px"},
@@ -196,11 +202,13 @@ app.layout = html.Div(
                         html.Div(
                             [
                                 html.Button("Hide Graph", id="toggle-graph-btn", n_clicks=0),
+                                html.Button("Arduino: ON", id="toggle-arduino-btn", n_clicks=0, style={"marginLeft": "10px"}),
                             ],
                             style={"marginTop": "10px"},
                         ),
                         html.Div(id="status", style={"marginTop": "10px", "fontWeight": "bold"}),
                         html.Div(id="error", style={"color": "#a00", "marginTop": "6px"}),
+                        html.Div(id="export-status", style={"color": "#0a0", "marginTop": "6px"}),
                         html.Hr(),
                     ],
                     style={"width": "28%", "display": "inline-block", "verticalAlign": "top", "padding": "10px"},
@@ -252,6 +260,7 @@ app.layout = html.Div(
         dcc.Store(id="table-count"),
         dcc.Store(id="run-state", data="stopped"),
         dcc.Store(id="graph-visible", data=True),
+        dcc.Store(id="arduino-enabled", data=True),
     ]
 )
 
@@ -260,6 +269,7 @@ app.layout = html.Div(
     Output("scan-cellular-btn", "style"),
     Output("scan-bt-btn", "style"),
     Output("scan-wifi-btn", "style"),
+    Output("scan-select-btn", "style"),
     Output("scan-all-btn", "style"),
     Input("scan-modes", "data"),
 )
@@ -275,8 +285,20 @@ def update_scan_button_styles(scan_modes):
         style_for("cellular"),
         style_for("bluetooth"),
         style_for("wifi"),
+        style_for("select"),
         style_for("all"),
     )
+
+
+@app.callback(
+    Output("selected-freq-container", "style"),
+    Input("scan-modes", "data"),
+)
+def toggle_selected_freq_input(scan_modes):
+    modes = set(scan_modes or [])
+    if "select" in modes:
+        return {"display": "block"}
+    return {"display": "none"}
 
 
 @app.callback(
@@ -312,6 +334,18 @@ def apply_graph_visibility(visible):
 
 
 @app.callback(
+    Output("arduino-enabled", "data"),
+    Output("toggle-arduino-btn", "children"),
+    Input("toggle-arduino-btn", "n_clicks"),
+    State("arduino-enabled", "data"),
+    prevent_initial_call=True,
+)
+def toggle_arduino(_clicks, enabled):
+    new_enabled = not bool(enabled)
+    return new_enabled, ("Arduino: ON" if new_enabled else "Arduino: OFF")
+
+
+@app.callback(
     Output("status", "children"),
     Output("error", "children"),
     Output("run-state", "data"),
@@ -328,6 +362,8 @@ def apply_graph_visibility(visible):
     State("sim-enabled", "value"),
     State("sim-tones", "value"),
     State("scan-modes", "data"),
+    State("selected-freq-ghz", "value"),
+    State("arduino-enabled", "data"),
     prevent_initial_call=True,
 )
 def on_control(
@@ -344,6 +380,8 @@ def on_control(
     sim_enabled_values,
     sim_tones,
     scan_modes,
+    selected_freq_ghz,
+    arduino_enabled,
 ):
     global worker
     triggered = dash.callback_context.triggered
@@ -360,6 +398,7 @@ def on_control(
         return "Stopped", "", "stopped"
 
     try:
+        selected_freq = parse_float(selected_freq_ghz, "Selected freq (GHz)")
         settings = {
             "usrp_args": DEFAULT_USRP_ARGS,
             "ant": ant or "TX/RX",
@@ -375,9 +414,10 @@ def on_control(
             "manual_y_enabled": "manual" in (manual_y_enabled or []),
             "y_min": parse_float(y_min, "Y min"),
             "y_max": parse_float(y_max, "Y max"),
-            "sweep_plan": build_sweep_plan(scan_modes or ["all"]),
+            "sweep_plan": build_sweep_plan(scan_modes or ["all"], selected_freq),
             "sim_enabled": "sim" in (sim_enabled_values or []),
             "sim_values": parse_sim_values(sim_tones or ""),
+            "arduino_enabled": bool(arduino_enabled),
         }
     except ValueError as exc:
         return "Idle", str(exc)
@@ -399,11 +439,12 @@ def on_control(
     Input("scan-cellular-btn", "n_clicks"),
     Input("scan-bt-btn", "n_clicks"),
     Input("scan-wifi-btn", "n_clicks"),
+    Input("scan-select-btn", "n_clicks"),
     Input("scan-all-btn", "n_clicks"),
     State("scan-modes", "data"),
     prevent_initial_call=True,
 )
-def set_scan_mode(cell_clicks, bt_clicks, wifi_clicks, all_clicks, scan_modes):
+def set_scan_mode(cell_clicks, bt_clicks, wifi_clicks, select_clicks, all_clicks, scan_modes):
     triggered = dash.callback_context.triggered
     if not triggered:
         return dash.no_update
@@ -418,8 +459,11 @@ def set_scan_mode(cell_clicks, bt_clicks, wifi_clicks, all_clicks, scan_modes):
 
     if trigger_id == "scan-all-btn":
         modes = {"all"}
+    elif trigger_id == "scan-select-btn":
+        modes = {"select"}
     else:
         modes.discard("all")
+        modes.discard("select")
         if trigger_id == "scan-cellular-btn":
             toggle_mode("cellular")
         elif trigger_id == "scan-bt-btn":
@@ -449,13 +493,14 @@ def toggle_run_state(run_state):
     Output("detections-table", "data"),
     Input("update-interval", "n_intervals"),
     Input("notes-store", "data"),
+    Input("clear-table-btn", "n_clicks"),
     Input("manual-y-enabled", "value"),
     Input("y-min", "value"),
     Input("y-max", "value"),
     State("run-state", "data"),
     State("table-count", "data"),
 )
-def update_display(_tick, notes_store, manual_y_enabled, y_min, y_max, run_state, table_count):
+def update_display(_tick, notes_store, clear_clicks, manual_y_enabled, y_min, y_max, run_state, table_count):
     with worker_lock:
         active_worker = worker
 
@@ -522,8 +567,13 @@ def update_display(_tick, notes_store, manual_y_enabled, y_min, y_max, run_state
         if manual_range is not None:
             fig["layout"]["yaxis"]["range"] = manual_range
 
+    triggered = dash.callback_context.triggered
+    trigger_id = triggered[0]["prop_id"].split(".")[0] if triggered else ""
+
     if run_state == "stopped":
-        return fig, dash.no_update
+        if trigger_id == "clear-table-btn":
+            return dash.no_update, []
+        return dash.no_update, dash.no_update
 
     with detect_lock:
         table_rows = list(detect_buffer)
@@ -544,22 +594,22 @@ def update_display(_tick, notes_store, manual_y_enabled, y_min, y_max, run_state
 
 @app.callback(
     Output("download-data", "data"),
-    Input("export-csv-btn", "n_clicks"),
+    Output("export-status", "children"),
     Input("export-xlsx-btn", "n_clicks"),
     Input("clear-table-btn", "n_clicks"),
     State("notes-store", "data"),
     prevent_initial_call=True,
 )
-def export_table(_csv_clicks, _xlsx_clicks, clear_clicks, notes_store):
+def export_table(_xlsx_clicks, clear_clicks, notes_store):
     triggered = dash.callback_context.triggered
     if not triggered:
-        return None
+        return None, ""
     trigger_id = triggered[0]["prop_id"].split(".")[0]
 
     if trigger_id == "clear-table-btn":
         with detect_lock:
             detect_buffer.clear()
-        return None
+        return None, ""
 
     with detect_lock:
         rows = list(detect_buffer)
@@ -573,30 +623,26 @@ def export_table(_csv_clicks, _xlsx_clicks, clear_clicks, notes_store):
                 row["false_positive"] = notes_map[key].get("false_positive", False)
 
     if not rows:
-        return None
-
-    filename_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return None, "No detections to export."
 
     if trigger_id == "export-xlsx-btn":
         if pd is None:
-            trigger_id = "export-csv-btn"
-        else:
-            output = io.BytesIO()
-            df = pd.DataFrame(rows)
-            with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False, sheet_name="detections")
-            output.seek(0)
-            return dcc.send_bytes(output.getvalue(), f"detections_{filename_ts}.xlsx")
+            return None, "Excel export unavailable: install pandas + openpyxl."
 
-    if trigger_id == "export-csv-btn":
-        output = io.StringIO()
-        fieldnames = list(rows[0].keys())
-        writer = csv.DictWriter(output, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-        return dcc.send_string(output.getvalue(), f"detections_{filename_ts}.csv")
+        log_path = "detections_log.xlsx"
+        df = pd.DataFrame(rows)
 
-    return None
+        if os.path.exists(log_path):
+            try:
+                existing = pd.read_excel(log_path)
+                df = pd.concat([existing, df], ignore_index=True)
+            except Exception:
+                pass
+
+        df.to_excel(log_path, index=False, sheet_name="detections")
+        return None, f"Saved {len(rows)} rows to {log_path}."
+
+    return None, ""
 
 
 @app.callback(
