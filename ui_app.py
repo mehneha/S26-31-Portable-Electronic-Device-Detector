@@ -11,6 +11,7 @@ Run:
 """
 
 import argparse
+import base64
 import csv
 import io
 import os
@@ -67,9 +68,25 @@ WIFI_SWEEP_FREQS = [
 BLUETOOTH_SWEEP_FREQS = [2.4e9]
 
 
-def build_sweep_plan(modes: list[str], selected_freq_ghz: float | None = None) -> list[float]:
-    if "select" in modes and selected_freq_ghz is not None:
-        return [selected_freq_ghz * 1e9]
+def build_sweep_plan(
+    modes: list[str],
+    select_mode: str = "exact",
+    selected_freq_ghz: float | None = None,
+    selected_min_ghz: float | None = None,
+    selected_max_ghz: float | None = None,
+) -> list[float]:
+    if "select" in modes:
+        if select_mode == "range" and selected_min_ghz is not None and selected_max_ghz is not None:
+            start_hz = selected_min_ghz * 1e9
+            end_hz = selected_max_ghz * 1e9
+            freqs: list[float] = []
+            f = start_hz
+            while f <= end_hz + 1.0:
+                freqs.append(f)
+                f += SWEEP_STEP_HZ
+            return freqs if freqs else [start_hz]
+        if selected_freq_ghz is not None:
+            return [selected_freq_ghz * 1e9]
 
     if "all" in modes or not modes:
         freqs = []
@@ -125,48 +142,35 @@ detect_lock = threading.Lock()
 worker_lock = threading.Lock()
 worker: SpectrumWorker | None = None
 
+
+def normalize_false_positive(value) -> str:
+    if isinstance(value, str):
+        return "Yes" if value.strip().lower() in {"yes", "true", "1"} else "No"
+    return "Yes" if bool(value) else "No"
+
+
+def load_logo_data_uri(image_path: str) -> str | None:
+    if not os.path.exists(image_path):
+        return None
+    try:
+        with open(image_path, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode("ascii")
+        ext = image_path.rsplit(".", 1)[-1].lower()
+        mime = "image/jpeg" if ext in {"jpg", "jpeg"} else "image/png"
+        return f"data:{mime};base64,{encoded}"
+    except Exception:
+        return None
+
+
+LOGO_DATA_URI = load_logo_data_uri("ZetaLogo.jpeg")
+
+
 app.layout = html.Div(
     [
-        html.H2("RX Spectrum Web UI"),
         html.Div(
             [
                 html.Div(
                     [
-                        html.H4("Settings"),
-                        html.Label("Antenna"),
-                        dcc.Dropdown(id="ant", options=[{"label": "TX/RX", "value": "TX/RX"}, {"label": "RX2", "value": "RX2"}], value="TX/RX"),
-                        html.Label("Gain factor"),
-                        dcc.Input(id="gain", type="text", value="10", style={"width": "100%"}),
-                        html.Hr(),
-                        html.Label("Threshold offset (dB)"),
-                        dcc.Input(id="thresh-offset", type="text", value="10.0", style={"width": "100%"}),
-                        html.Label("Scan interval (s)"),
-                        dcc.Input(id="scan-interval", type="text", value="20", style={"width": "100%"}),
-                        html.Label("Detection interval (s)"),
-                        dcc.Input(id="detect-interval", type="text", value="0.2", style={"width": "100%"}),
-                        html.Hr(),
-                        dcc.Checklist(
-                            id="manual-y-enabled",
-                            options=[{"label": "Manual Y range", "value": "manual"}],
-                            value=[],
-                        ),
-                        html.Div(
-                            id="manual-y-inputs",
-                            children=[
-                                html.Label("Y min (dB)"),
-                                dcc.Input(id="y-min", type="text", value="-90", style={"width": "100%"}),
-                                html.Label("Y max (dB)"),
-                                dcc.Input(id="y-max", type="text", value="0", style={"width": "100%"}),
-                            ],
-                            style={"display": "none", "marginTop": "6px"},
-                        ),
-                        dcc.Checklist(
-                            id="sim-enabled",
-                            options=[{"label": "Enable simulation mode", "value": "sim"}],
-                            value=[],
-                        ),
-                        html.Label("Sim tones (Hz, space or comma separated)"),
-                        dcc.Textarea(id="sim-tones", value="", style={"width": "100%", "height": "80px"}),
                         html.Div(
                             [
                                 html.Button("Cellular", id="scan-cellular-btn", n_clicks=0),
@@ -180,38 +184,126 @@ app.layout = html.Div(
                         html.Div(
                             id="selected-freq-container",
                             children=[
-                                html.Label("Selected freq (GHz)"),
-                                dcc.Input(id="selected-freq-ghz", type="text", value="2.42", style={"width": "100%"}),
+                                html.Div(
+                                    [
+                                        dcc.Checklist(
+                                            id="select-exact-mode",
+                                            options=[{"label": "Exact", "value": "exact"}],
+                                            value=["exact"],
+                                        ),
+                                        dcc.Checklist(
+                                            id="select-range-mode",
+                                            options=[{"label": "Range", "value": "range"}],
+                                            value=[],
+                                            style={"marginLeft": "16px"},
+                                        ),
+                                    ],
+                                    style={"display": "flex", "alignItems": "center", "marginTop": "6px"},
+                                ),
+                                html.Div(
+                                    id="select-exact-input-container",
+                                    children=[
+                                        html.Label("Selected freq (GHz)"),
+                                        dcc.Input(id="selected-freq-ghz", type="text", value="2.42", style={"width": "100%"}),
+                                    ],
+                                    style={"display": "block"},
+                                ),
+                                html.Div(
+                                    id="select-range-input-container",
+                                    children=[
+                                        html.Label("Selected min freq (GHz)"),
+                                        dcc.Input(id="selected-min-ghz", type="text", value="0.65", style={"width": "100%"}),
+                                        html.Label("Selected max freq (GHz)"),
+                                        dcc.Input(id="selected-max-ghz", type="text", value="6.0", style={"width": "100%"}),
+                                    ],
+                                    style={"display": "none"},
+                                ),
                             ],
                             style={"display": "none"},
                         ),
                         html.Div(
                             [
                                 html.Button("Start", id="start-btn", n_clicks=0),
-                                html.Button("Stop", id="stop-btn", n_clicks=0, style={"marginLeft": "10px"}),
+                                html.Button("Stop", id="stop-btn", n_clicks=0),
                             ],
-                            style={"marginTop": "10px"},
+                            style={"marginTop": "10px", "display": "flex", "gap": "10px", "width": "100%"},
                         ),
-                        html.Div(
+                        html.Details(
                             [
-                                html.Button("Export Excel", id="export-xlsx-btn", n_clicks=0),
-                                html.Button("Clear Table", id="clear-table-btn", n_clicks=0, style={"marginLeft": "10px"}),
+                                html.Summary("Settings"),
+                                html.Div(
+                                    [
+                                        html.Label("Antenna"),
+                                        dcc.Dropdown(
+                                            id="ant",
+                                            options=[
+                                                {"label": "TX/RX", "value": "TX/RX"},
+                                                {"label": "RX2", "value": "RX2"},
+                                            ],
+                                            value="TX/RX",
+                                        ),
+                                        html.Label("Gain factor"),
+                                        dcc.Input(id="gain", type="text", value="10", style={"width": "100%"}),
+                                        html.Label("Threshold offset (dB)"),
+                                        dcc.Input(id="thresh-offset", type="text", value="10.0", style={"width": "100%"}),
+                                        html.Label("Scan interval (s)"),
+                                        dcc.Input(id="scan-interval", type="text", value="20", style={"width": "100%"}),
+                                        html.Label("Detection interval (s)"),
+                                        dcc.Input(id="detect-interval", type="text", value="0.2", style={"width": "100%"}),
+                                        dcc.Checklist(
+                                            id="manual-y-enabled",
+                                            options=[{"label": "Manual Y range", "value": "manual"}],
+                                            value=[],
+                                        ),
+                                        html.Div(
+                                            id="manual-y-inputs",
+                                            children=[
+                                                html.Label("Y max (dB)"),
+                                                dcc.Input(id="y-max", type="text", value="-80", style={"width": "100%"}),
+                                                html.Label("Y min (dB)"),
+                                                dcc.Input(id="y-min", type="text", value="-135", style={"width": "100%"}),
+                                            ],
+                                            style={"display": "none", "marginTop": "6px"},
+                                        ),
+                                        dcc.Checklist(
+                                            id="sim-enabled",
+                                            options=[{"label": "Enable simulation mode", "value": "sim"}],
+                                            value=[],
+                                        ),
+                                        html.Div(
+                                            id="sim-tones-container",
+                                            children=[
+                                                html.Label("Sim tones (Hz, space or comma separated)"),
+                                                dcc.Textarea(id="sim-tones", value="", style={"width": "100%", "height": "80px"}),
+                                            ],
+                                            style={"display": "none"},
+                                        ),
+                                        html.Div(
+                                            [
+                                                html.Button("Export Excel", id="export-xlsx-btn", n_clicks=0),
+                                                html.Button("Clear Table", id="clear-table-btn", n_clicks=0, style={"marginLeft": "10px"}),
+                                            ],
+                                            style={"marginTop": "10px"},
+                                        ),
+                                        html.Div(
+                                            [
+                                                html.Button("Hide Graph", id="toggle-graph-btn", n_clicks=0),
+                                                html.Button("Arduino: ON", id="toggle-arduino-btn", n_clicks=0, style={"marginLeft": "10px"}),
+                                            ],
+                                            style={"marginTop": "10px"},
+                                        ),
+                                    ],
+                                    style={"marginTop": "8px"},
+                                ),
                             ],
+                            open=False,
                             style={"marginTop": "10px"},
                         ),
-                        html.Div(
-                            [
-                                html.Button("Hide Graph", id="toggle-graph-btn", n_clicks=0),
-                                html.Button("Arduino: ON", id="toggle-arduino-btn", n_clicks=0, style={"marginLeft": "10px"}),
-                            ],
-                            style={"marginTop": "10px"},
-                        ),
-                        html.Div(id="status", style={"marginTop": "10px", "fontWeight": "bold"}),
                         html.Div(id="error", style={"color": "#a00", "marginTop": "6px"}),
                         html.Div(id="export-status", style={"color": "#0a0", "marginTop": "6px"}),
                         html.Hr(),
                     ],
-                    style={"width": "28%", "display": "inline-block", "verticalAlign": "top", "padding": "10px"},
+                    style={"width": "22%", "display": "inline-block", "verticalAlign": "top", "padding": "10px"},
                 ),
                 html.Div(
                     [
@@ -219,7 +311,6 @@ app.layout = html.Div(
                             dcc.Graph(id="spectrum-graph"),
                             id="graph-container",
                         ),
-                        html.H4("Detections"),
                         dash_table.DataTable(
                             id="detections-table",
                             columns=[
@@ -229,27 +320,37 @@ app.layout = html.Div(
                                 {"name": "Detection", "id": "detection"},
                                 {"name": "Center freq", "id": "center_freq_label"},
                                 {"name": "RX gain (dB)", "id": "rx_gain_db"},
-                                {"name": "Notes", "id": "notes", "editable": True},
                                 {"name": "False Detection", "id": "false_positive", "presentation": "dropdown", "editable": True},
+                                {"name": "Notes", "id": "notes", "editable": True},
                             ],
                             dropdown={
                                 "false_positive": {
                                     "options": [
-                                        {"label": "False", "value": False},
-                                        {"label": "True", "value": True},
+                                        {"label": "No", "value": "No"},
+                                        {"label": "Yes", "value": "Yes"},
                                     ],
                                     "clearable": False,
                                 }
                             },
                             data=[],
                             page_size=10,
-                            style_table={"height": "260px", "overflowY": "auto"},
+                            style_table={
+                                "height": "260px",
+                                "overflowY": "auto",
+                                "marginLeft": "10px",
+                                "width": "calc(100% - 10px)",
+                                "boxSizing": "border-box",
+                            },
                             style_cell={"fontFamily": "monospace", "fontSize": "12px", "padding": "6px"},
                             style_header={"fontWeight": "bold"},
+                            style_cell_conditional=[
+                                {"if": {"column_id": "false_positive"}, "width": "120px", "minWidth": "120px", "maxWidth": "120px"},
+                                {"if": {"column_id": "notes"}, "width": "260px", "minWidth": "260px"},
+                            ],
                             editable=True,
                         ),
                     ],
-                    style={"width": "70%", "display": "inline-block", "verticalAlign": "top"},
+                    style={"width": "75%", "display": "inline-block", "verticalAlign": "top", "paddingLeft": "20px"},
                 ),
             ]
         ),
@@ -276,7 +377,7 @@ app.layout = html.Div(
 def update_scan_button_styles(scan_modes):
     modes = set(scan_modes or [])
     base = {"marginLeft": "6px"}
-    selected = {"marginLeft": "6px", "backgroundColor": "#0b5", "color": "white"}
+    selected = {"marginLeft": "6px", "backgroundColor": "#06c", "color": "white"}
 
     def style_for(mode):
         return selected if mode in modes else base
@@ -287,6 +388,24 @@ def update_scan_button_styles(scan_modes):
         style_for("wifi"),
         style_for("select"),
         style_for("all"),
+    )
+
+
+@app.callback(
+    Output("start-btn", "style"),
+    Output("stop-btn", "style"),
+    Input("run-state", "data"),
+)
+def update_run_button_styles(run_state):
+    base = {"fontSize": "22px", "padding": "12px 18px", "flex": "1", "width": "100%"}
+    if run_state == "running":
+        return (
+            {**base, "backgroundColor": "#0b5", "color": "white", "border": "1px solid #0b5"},
+            base,
+        )
+    return (
+        base,
+        {**base, "backgroundColor": "#c22", "color": "white", "border": "1px solid #c22"},
     )
 
 
@@ -302,6 +421,45 @@ def toggle_selected_freq_input(scan_modes):
 
 
 @app.callback(
+    Output("select-exact-mode", "value"),
+    Output("select-range-mode", "value"),
+    Input("select-exact-mode", "value"),
+    Input("select-range-mode", "value"),
+    prevent_initial_call=True,
+)
+def enforce_select_mode_mutual_exclusive(exact_values, range_values):
+    triggered = dash.callback_context.triggered
+    trigger_id = triggered[0]["prop_id"].split(".")[0] if triggered else ""
+    exact_on = "exact" in (exact_values or [])
+    range_on = "range" in (range_values or [])
+
+    if trigger_id == "select-exact-mode" and exact_on:
+        return ["exact"], []
+    if trigger_id == "select-range-mode" and range_on:
+        return [], ["range"]
+    if exact_on and range_on:
+        return ["exact"], []
+    return exact_values or [], range_values or []
+
+
+@app.callback(
+    Output("select-exact-input-container", "style"),
+    Output("select-range-input-container", "style"),
+    Input("scan-modes", "data"),
+    Input("select-exact-mode", "value"),
+    Input("select-range-mode", "value"),
+)
+def toggle_select_input_mode(scan_modes, exact_values, range_values):
+    modes = set(scan_modes or [])
+    if "select" not in modes:
+        return {"display": "none"}, {"display": "none"}
+
+    if "range" in (range_values or []):
+        return {"display": "none"}, {"display": "block"}
+    return {"display": "block"}, {"display": "none"}
+
+
+@app.callback(
     Output("manual-y-inputs", "style"),
     Input("manual-y-enabled", "value"),
 )
@@ -309,6 +467,16 @@ def toggle_manual_y_inputs(enabled_values):
     if "manual" in (enabled_values or []):
         return {"display": "block", "marginTop": "6px"}
     return {"display": "none", "marginTop": "6px"}
+
+
+@app.callback(
+    Output("sim-tones-container", "style"),
+    Input("sim-enabled", "value"),
+)
+def toggle_sim_tones_inputs(enabled_values):
+    if "sim" in (enabled_values or []):
+        return {"display": "block"}
+    return {"display": "none"}
 
 
 @app.callback(
@@ -346,7 +514,6 @@ def toggle_arduino(_clicks, enabled):
 
 
 @app.callback(
-    Output("status", "children"),
     Output("error", "children"),
     Output("run-state", "data"),
     Input("start-btn", "n_clicks"),
@@ -362,7 +529,11 @@ def toggle_arduino(_clicks, enabled):
     State("sim-enabled", "value"),
     State("sim-tones", "value"),
     State("scan-modes", "data"),
+    State("select-exact-mode", "value"),
+    State("select-range-mode", "value"),
     State("selected-freq-ghz", "value"),
+    State("selected-min-ghz", "value"),
+    State("selected-max-ghz", "value"),
     State("arduino-enabled", "data"),
     prevent_initial_call=True,
 )
@@ -380,13 +551,17 @@ def on_control(
     sim_enabled_values,
     sim_tones,
     scan_modes,
+    select_exact_mode,
+    select_range_mode,
     selected_freq_ghz,
+    selected_min_ghz,
+    selected_max_ghz,
     arduino_enabled,
 ):
     global worker
     triggered = dash.callback_context.triggered
     if not triggered:
-        return "Idle", ""
+        return "", dash.no_update
 
     trigger_id = triggered[0]["prop_id"].split(".")[0]
 
@@ -395,10 +570,22 @@ def on_control(
             if worker is not None:
                 worker.stop()
                 worker = None
-        return "Stopped", "", "stopped"
+        return "", "stopped"
 
     try:
-        selected_freq = parse_float(selected_freq_ghz, "Selected freq (GHz)")
+        modes = scan_modes or ["all"]
+        select_mode = "range" if "range" in (select_range_mode or []) else "exact"
+
+        selected_freq = None
+        selected_min = None
+        selected_max = None
+        if "select" in modes:
+            if select_mode == "range":
+                selected_min = parse_float(selected_min_ghz, "Selected min freq (GHz)")
+                selected_max = parse_float(selected_max_ghz, "Selected max freq (GHz)")
+            else:
+                selected_freq = parse_float(selected_freq_ghz, "Selected freq (GHz)")
+
         settings = {
             "usrp_args": DEFAULT_USRP_ARGS,
             "ant": ant or "TX/RX",
@@ -414,16 +601,25 @@ def on_control(
             "manual_y_enabled": "manual" in (manual_y_enabled or []),
             "y_min": parse_float(y_min, "Y min"),
             "y_max": parse_float(y_max, "Y max"),
-            "sweep_plan": build_sweep_plan(scan_modes or ["all"], selected_freq),
+            "sweep_plan": build_sweep_plan(
+                modes,
+                select_mode=select_mode,
+                selected_freq_ghz=selected_freq,
+                selected_min_ghz=selected_min,
+                selected_max_ghz=selected_max,
+            ),
             "sim_enabled": "sim" in (sim_enabled_values or []),
             "sim_values": parse_sim_values(sim_tones or ""),
             "arduino_enabled": bool(arduino_enabled),
         }
     except ValueError as exc:
-        return "Idle", str(exc)
+        return str(exc), dash.no_update
 
     if settings["manual_y_enabled"] and settings["y_min"] >= settings["y_max"]:
-        return "Idle", "Y min must be less than Y max."
+        return "Y min must be less than Y max.", dash.no_update
+    if "select" in (scan_modes or []) and "range" in (select_range_mode or []) and selected_min is not None and selected_max is not None:
+        if selected_min >= selected_max:
+            return "Selected min freq must be less than selected max freq.", dash.no_update
 
     with worker_lock:
         if worker is not None:
@@ -431,7 +627,7 @@ def on_control(
         worker = SpectrumWorker(settings, detect_buffer, detect_lock)
         worker.start()
 
-    return "Running", "", "running"
+    return "", "running"
 
 
 @app.callback(
@@ -516,14 +712,40 @@ def update_display(_tick, notes_store, clear_clicks, manual_y_enabled, y_min, y_
             manual_range = None
 
     if active_worker is None:
-        fig = {
-            "data": [],
-            "layout": {
-                "title": "No data",
-                "xaxis": {"title": "Frequency (Hz)"},
-                "yaxis": {"title": "Power Spectral Density (dB)"},
-            },
-        }
+        if LOGO_DATA_URI is not None:
+            fig = {
+                "data": [],
+                "layout": {
+                    "title": "Spectrum",
+                    "uirevision": "spectrum-fixed",
+                    "xaxis": {"visible": False, "showgrid": False, "zeroline": False},
+                    "yaxis": {"visible": False, "showgrid": False, "zeroline": False},
+                    "images": [
+                        {
+                            "source": LOGO_DATA_URI,
+                            "xref": "paper",
+                            "yref": "paper",
+                            "x": 0,
+                            "y": 1,
+                            "sizex": 1,
+                            "sizey": 1,
+                            "sizing": "contain",
+                            "layer": "below",
+                            "opacity": 1.0,
+                        }
+                    ],
+                    "margin": {"l": 40, "r": 20, "t": 50, "b": 40},
+                },
+            }
+        else:
+            fig = {
+                "data": [],
+                "layout": {
+                    "title": "No data",
+                    "xaxis": {"title": "Frequency (Hz)"},
+                    "yaxis": {"title": "Power Spectral Density (dB)"},
+                },
+            }
     else:
         latest = active_worker.get_latest()
         x_plot = latest["x"]
@@ -547,6 +769,7 @@ def update_display(_tick, notes_store, clear_clicks, manual_y_enabled, y_min, y_
             ],
             "layout": {
                 "title": latest["title"] or "Spectrum",
+                "uirevision": "spectrum-fixed",
                 "xaxis": {
                     "title": {"text": "Frequency (GHz)", "standoff": 20},
                     "tickformat": ".3f",
@@ -559,6 +782,35 @@ def update_display(_tick, notes_store, clear_clicks, manual_y_enabled, y_min, y_
                 "margin": {"l": 40, "r": 20, "t": 50, "b": 40},
             }
         }
+
+        threshold_db = latest.get("threshold_db")
+        if threshold_db is not None and len(x_plot) > 1:
+            fig["layout"]["shapes"] = [
+                {
+                    "type": "line",
+                    "xref": "paper",
+                    "x0": 0,
+                    "x1": 1,
+                    "yref": "y",
+                    "y0": threshold_db,
+                    "y1": threshold_db,
+                    "line": {"color": "red", "width": 2, "dash": "dash"},
+                }
+            ]
+            fig["layout"]["annotations"] = [
+                {
+                    "xref": "paper",
+                    "x": 1,
+                    "yref": "y",
+                    "y": threshold_db,
+                    "text": f"Threshold {threshold_db:.1f} dB",
+                    "showarrow": False,
+                    "xanchor": "right",
+                    "yanchor": "bottom",
+                    "font": {"color": "red"},
+                    "bgcolor": "rgba(255,255,255,0.75)",
+                }
+            ]
 
         if manual_range is not None:
             fig["layout"]["yaxis"]["range"] = manual_range
@@ -573,6 +825,8 @@ def update_display(_tick, notes_store, clear_clicks, manual_y_enabled, y_min, y_
     if run_state == "stopped":
         if trigger_id == "clear-table-btn":
             return dash.no_update, []
+        if active_worker is None:
+            return fig, dash.no_update
         return dash.no_update, dash.no_update
 
     with detect_lock:
@@ -583,7 +837,9 @@ def update_display(_tick, notes_store, clear_clicks, manual_y_enabled, y_min, y_
         key = row.get("id")
         if key in notes_map:
             row["notes"] = notes_map[key].get("notes", "")
-            row["false_positive"] = notes_map[key].get("false_positive", False)
+            row["false_positive"] = normalize_false_positive(notes_map[key].get("false_positive", "No"))
+        else:
+            row["false_positive"] = normalize_false_positive(row.get("false_positive", "No"))
 
     current_count = len(table_rows)
     if table_count is not None and current_count == table_count:
@@ -620,7 +876,12 @@ def export_table(_xlsx_clicks, clear_clicks, notes_store):
             key = row.get("id")
             if key in notes_map:
                 row["notes"] = notes_map[key].get("notes", "")
-                row["false_positive"] = notes_map[key].get("false_positive", False)
+                row["false_positive"] = normalize_false_positive(notes_map[key].get("false_positive", "No"))
+            else:
+                row["false_positive"] = normalize_false_positive(row.get("false_positive", "No"))
+    else:
+        for row in rows:
+            row["false_positive"] = normalize_false_positive(row.get("false_positive", "No"))
 
     if not rows:
         return None, "No detections to export."
@@ -638,6 +899,9 @@ def export_table(_xlsx_clicks, clear_clicks, notes_store):
                 df = pd.concat([existing, df], ignore_index=True)
             except Exception:
                 pass
+
+        if "false_positive" in df.columns:
+            df["false_positive"] = df["false_positive"].apply(normalize_false_positive)
 
         df.to_excel(log_path, index=False, sheet_name="detections")
         return None, f"Saved {len(rows)} rows to {log_path}."
@@ -660,7 +924,7 @@ def save_notes(rows):
         if key:
             notes_map[key] = {
                 "notes": row.get("notes", ""),
-                "false_positive": bool(row.get("false_positive", False)),
+                "false_positive": normalize_false_positive(row.get("false_positive", "No")),
             }
     with detect_lock:
         for idx, row in enumerate(detect_buffer):

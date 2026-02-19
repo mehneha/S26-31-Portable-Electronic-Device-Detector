@@ -1,5 +1,6 @@
 # Helper functions
 from typing import Optional
+import time
 
 import numpy as np
 
@@ -105,17 +106,27 @@ def open_arduino(port: str = "COM5", baud: int = 9600):
     if serial is None:
         return None, "pyserial not installed"
     try:
-        return serial.Serial(port, baud), f"Connected ({port} @ {baud})"
+        arduino = serial.Serial(port, baud, timeout=0.2, write_timeout=0.2)
+        # Allow board auto-reset on serial open to finish before first command.
+        time.sleep(2.0)
+        try:
+            arduino.reset_input_buffer()
+            arduino.reset_output_buffer()
+        except Exception:
+            pass
+        return arduino, f"Connected ({port} @ {baud})"
     except Exception as exc:
         return None, f"Failed: {exc}"
 
 
-def write_arduino(arduino, detected: bool) -> None:
+def write_arduino(arduino, detected: bool | None) -> None:
     if arduino is None:
         return
     try:
         if detected:
             arduino.write(b"RED\n")
+        elif detected is None:
+            arduino.write(b"YELLOW\n")
         else:
             arduino.write(b"GREEN\n")
     except Exception:
