@@ -53,19 +53,30 @@ PLOT_MAX_POINTS = 3000
 
 CELLULAR_SWEEP_FREQS = [
     700e6,
-    850e6,
-    1900e6,
-    2109e6,
-    2600e6,
+    740e6,
+    780e6,
+    820e6,
+    860e6,
+    900e6,
+    940e6,
+    980e6,
 ]
 
 WIFI_SWEEP_FREQS = [
-    5.730e9,
+    5.70e9,
     5.740e9,
-    5.750e9,
+    5.780e9,
+    5.820e9,
+    5.860e9,
 ]
 
-BLUETOOTH_SWEEP_FREQS = [2.4e9]
+BLUETOOTH_SWEEP_FREQS = [
+    2.4e9,
+    2.44e9,
+    2.48e9,
+    2.52e9,
+    2.56e9,
+]
 
 
 def build_sweep_plan(
@@ -245,9 +256,9 @@ app.layout = html.Div(
                                         html.Label("Gain factor"),
                                         dcc.Input(id="gain", type="text", value="10", style={"width": "100%"}),
                                         html.Label("Threshold offset (dB)"),
-                                        dcc.Input(id="thresh-offset", type="text", value="10.0", style={"width": "100%"}),
+                                        dcc.Input(id="thresh-offset", type="text", value="11.0", style={"width": "100%"}),
                                         html.Label("Scan interval (s)"),
-                                        dcc.Input(id="scan-interval", type="text", value="20", style={"width": "100%"}),
+                                        dcc.Input(id="scan-interval", type="text", value="60", style={"width": "100%"}),
                                         html.Label("Detection interval (s)"),
                                         dcc.Input(id="detect-interval", type="text", value="0.2", style={"width": "100%"}),
                                         dcc.Checklist(
@@ -259,9 +270,9 @@ app.layout = html.Div(
                                             id="manual-y-inputs",
                                             children=[
                                                 html.Label("Y max (dB)"),
-                                                dcc.Input(id="y-max", type="text", value="-80", style={"width": "100%"}),
+                                                dcc.Input(id="y-max", type="text", value="-110", style={"width": "100%"}),
                                                 html.Label("Y min (dB)"),
-                                                dcc.Input(id="y-min", type="text", value="-135", style={"width": "100%"}),
+                                                dcc.Input(id="y-min", type="text", value="-140", style={"width": "100%"}),
                                             ],
                                             style={"display": "none", "marginTop": "6px"},
                                         ),
@@ -278,6 +289,61 @@ app.layout = html.Div(
                                             ],
                                             style={"display": "none"},
                                         ),
+                                        dcc.Checklist(
+                                            id="arduino-enabled",
+                                            options=[{"label": "Enable Arduino", "value": "ardu"}],
+                                            value=["ardu"],
+                                        ),
+                                        html.Div(
+                                            id="arduino-options-container",
+                                            children=[
+                                                dcc.Checklist(
+                                                    id="arduino-red-enabled",
+                                                    options=[{"label": "Red LED", "value": "red"}],
+                                                    value=["red"],
+                                                ),
+                                                html.Div(
+                                                    id="arduino-red-duration-container",
+                                                    children=[
+                                                        html.Label("Red duration (ms)"),
+                                                        dcc.Input(id="arduino-red-duration-ms", type="text", value="300", debounce=True, style={"width": "100%"}),
+                                                    ],
+                                                    style={"display": "block"},
+                                                ),
+                                                dcc.Checklist(
+                                                    id="arduino-green-enabled",
+                                                    options=[{"label": "Green LED", "value": "green"}],
+                                                    value=["green"],
+                                                ),
+                                                html.Div(
+                                                    id="arduino-green-duration-container",
+                                                    children=[
+                                                        html.Label("Green duration (ms)"),
+                                                        dcc.Input(id="arduino-green-duration-ms", type="text", value="300", style={"width": "100%"}),
+                                                    ],
+                                                    style={"display": "block"},
+                                                ),
+                                                dcc.Checklist(
+                                                    id="arduino-yellow-enabled",
+                                                    options=[{"label": "Yellow LED", "value": "yellow"}],
+                                                    value=["yellow"],
+                                                ),
+                                                dcc.Checklist(
+                                                    id="arduino-speaker-enabled",
+                                                    options=[{"label": "Speaker", "value": "speaker"}],
+                                                    value=["speaker"],
+                                                ),
+                                                html.Div(
+                                                    id="arduino-speaker-duration-container",
+                                                    children=[
+                                                        html.Label("Speaker duration (ms)"),
+                                                        dcc.Input(id="arduino-speaker-duration-ms", type="text", value="300", debounce=True, style={"width": "100%"}),
+                                                    ],
+                                                    style={"display": "block"},
+                                                ),
+                                            ],
+                                            style={"display": "block"},
+                                        ),
                                         html.Div(
                                             [
                                                 html.Button("Export Excel", id="export-xlsx-btn", n_clicks=0),
@@ -288,7 +354,6 @@ app.layout = html.Div(
                                         html.Div(
                                             [
                                                 html.Button("Hide Graph", id="toggle-graph-btn", n_clicks=0),
-                                                html.Button("Arduino: ON", id="toggle-arduino-btn", n_clicks=0, style={"marginLeft": "10px"}),
                                             ],
                                             style={"marginTop": "10px"},
                                         ),
@@ -361,7 +426,6 @@ app.layout = html.Div(
         dcc.Store(id="table-count"),
         dcc.Store(id="run-state", data="stopped"),
         dcc.Store(id="graph-visible", data=True),
-        dcc.Store(id="arduino-enabled", data=True),
     ]
 )
 
@@ -502,15 +566,62 @@ def apply_graph_visibility(visible):
 
 
 @app.callback(
-    Output("arduino-enabled", "data"),
-    Output("toggle-arduino-btn", "children"),
-    Input("toggle-arduino-btn", "n_clicks"),
-    State("arduino-enabled", "data"),
-    prevent_initial_call=True,
+    Output("arduino-options-container", "style"),
+    Input("arduino-enabled", "value"),
 )
-def toggle_arduino(_clicks, enabled):
-    new_enabled = not bool(enabled)
-    return new_enabled, ("Arduino: ON" if new_enabled else "Arduino: OFF")
+def toggle_arduino_options(enabled_values):
+    if "ardu" in (enabled_values or []):
+        return {"display": "block"}
+    return {"display": "none"}
+
+
+@app.callback(
+    Output("arduino-red-duration-container", "style"),
+    Input("arduino-red-enabled", "value"),
+)
+def toggle_arduino_red_duration(values):
+    if "red" in (values or []):
+        return {"display": "block"}
+    return {"display": "none"}
+
+
+@app.callback(
+    Output("arduino-green-duration-container", "style"),
+    Input("arduino-green-enabled", "value"),
+)
+def toggle_arduino_green_duration(values):
+    if "green" in (values or []):
+        return {"display": "block"}
+    return {"display": "none"}
+
+
+@app.callback(
+    Output("arduino-speaker-duration-container", "style"),
+    Input("arduino-speaker-enabled", "value"),
+)
+def toggle_arduino_speaker_duration(values):
+    if "speaker" in (values or []):
+        return {"display": "block"}
+    return {"display": "none"}
+
+
+@app.callback(
+    Output("arduino-speaker-duration-ms", "value"),
+    Input("arduino-red-duration-ms", "value"),
+    Input("arduino-speaker-duration-ms", "value"),
+)
+def clamp_speaker_duration_display(red_value, speaker_value):
+    try:
+        red_ms = int(red_value)
+        speaker_ms = int(speaker_value)
+    except (TypeError, ValueError):
+        return speaker_value
+
+    if red_ms < 0 or speaker_ms < 0:
+        return speaker_value
+    if speaker_ms > red_ms:
+        return str(red_ms)
+    return str(speaker_ms)
 
 
 @app.callback(
@@ -528,13 +639,20 @@ def toggle_arduino(_clicks, enabled):
     State("y-max", "value"),
     State("sim-enabled", "value"),
     State("sim-tones", "value"),
+    State("arduino-enabled", "value"),
+    State("arduino-red-enabled", "value"),
+    State("arduino-green-enabled", "value"),
+    State("arduino-yellow-enabled", "value"),
+    State("arduino-speaker-enabled", "value"),
+    State("arduino-red-duration-ms", "value"),
+    State("arduino-green-duration-ms", "value"),
+    State("arduino-speaker-duration-ms", "value"),
     State("scan-modes", "data"),
     State("select-exact-mode", "value"),
     State("select-range-mode", "value"),
     State("selected-freq-ghz", "value"),
     State("selected-min-ghz", "value"),
     State("selected-max-ghz", "value"),
-    State("arduino-enabled", "data"),
     prevent_initial_call=True,
 )
 def on_control(
@@ -550,13 +668,20 @@ def on_control(
     y_max,
     sim_enabled_values,
     sim_tones,
+    arduino_enabled_values,
+    arduino_red_values,
+    arduino_green_values,
+    arduino_yellow_values,
+    arduino_speaker_values,
+    arduino_red_duration_ms,
+    arduino_green_duration_ms,
+    arduino_speaker_duration_ms,
     scan_modes,
     select_exact_mode,
     select_range_mode,
     selected_freq_ghz,
     selected_min_ghz,
     selected_max_ghz,
-    arduino_enabled,
 ):
     global worker
     triggered = dash.callback_context.triggered
@@ -586,6 +711,12 @@ def on_control(
             else:
                 selected_freq = parse_float(selected_freq_ghz, "Selected freq (GHz)")
 
+        red_duration_ms = parse_int(arduino_red_duration_ms, "Red duration (ms)")
+        green_duration_ms = parse_int(arduino_green_duration_ms, "Green duration (ms)")
+        speaker_duration_ms = parse_int(arduino_speaker_duration_ms, "Speaker duration (ms)")
+        if speaker_duration_ms > red_duration_ms:
+            speaker_duration_ms = red_duration_ms
+
         settings = {
             "usrp_args": DEFAULT_USRP_ARGS,
             "ant": ant or "TX/RX",
@@ -610,7 +741,14 @@ def on_control(
             ),
             "sim_enabled": "sim" in (sim_enabled_values or []),
             "sim_values": parse_sim_values(sim_tones or ""),
-            "arduino_enabled": bool(arduino_enabled),
+            "arduino_enabled": "ardu" in (arduino_enabled_values or []),
+            "arduino_red_enabled": "red" in (arduino_red_values or []),
+            "arduino_green_enabled": "green" in (arduino_green_values or []),
+            "arduino_yellow_enabled": "yellow" in (arduino_yellow_values or []),
+            "arduino_speaker_enabled": "speaker" in (arduino_speaker_values or []),
+            "arduino_red_duration_ms": red_duration_ms,
+            "arduino_green_duration_ms": green_duration_ms,
+            "arduino_speaker_duration_ms": speaker_duration_ms,
         }
     except ValueError as exc:
         return str(exc), dash.no_update
@@ -620,6 +758,8 @@ def on_control(
     if "select" in (scan_modes or []) and "range" in (select_range_mode or []) and selected_min is not None and selected_max is not None:
         if selected_min >= selected_max:
             return "Selected min freq must be less than selected max freq.", dash.no_update
+    if settings["arduino_red_duration_ms"] < 0 or settings["arduino_green_duration_ms"] < 0 or settings["arduino_speaker_duration_ms"] < 0:
+        return "Arduino durations must be >= 0.", dash.no_update
 
     with worker_lock:
         if worker is not None:

@@ -119,16 +119,42 @@ def open_arduino(port: str = "COM5", baud: int = 9600):
         return None, f"Failed: {exc}"
 
 
-def write_arduino(arduino, detected: bool | None) -> None:
+def write_arduino(arduino, detected: bool | None, cfg: Optional[dict] = None) -> None:
     if arduino is None:
         return
+
+    if cfg is None:
+        cfg = {
+            "red_enabled": True,
+            "green_enabled": True,
+            "yellow_enabled": True,
+            "speaker_enabled": True,
+            "red_duration_ms": 300,
+            "green_duration_ms": 300,
+            "speaker_duration_ms": 300,
+        }
+
+    red_enabled = 1 if cfg.get("red_enabled", True) else 0
+    green_enabled = 1 if cfg.get("green_enabled", True) else 0
+    yellow_enabled = 1 if cfg.get("yellow_enabled", True) else 0
+    speaker_enabled = 1 if cfg.get("speaker_enabled", True) else 0
+    red_duration_ms = max(0, int(cfg.get("red_duration_ms", 300)))
+    green_duration_ms = max(0, int(cfg.get("green_duration_ms", 300)))
+    speaker_duration_ms = max(0, int(cfg.get("speaker_duration_ms", 300)))
+
     try:
         if detected:
-            arduino.write(b"RED\n")
+            state = "RED"
         elif detected is None:
-            arduino.write(b"YELLOW\n")
+            state = "YELLOW"
         else:
-            arduino.write(b"GREEN\n")
+            state = "GREEN"
+        # Backward-compatible CSV command. Legacy sketches may ignore this.
+        cmd = (
+            f"CFG,{state},{red_enabled},{green_enabled},{yellow_enabled},"
+            f"{speaker_enabled},{red_duration_ms},{green_duration_ms},{speaker_duration_ms}\n"
+        )
+        arduino.write(cmd.encode("ascii", errors="ignore"))
     except Exception:
         return
 

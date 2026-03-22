@@ -81,9 +81,12 @@ def _save_detection_snapshot(
         os.makedirs(out_dir, exist_ok=True)
 
         ts = str(row.get("timestamp", "")).replace(":", "-")
+        ts_token = ts.replace(".", "_")
         peak_power_db = float(row.get("peak_power_db", 0.0))
         peak_freq_ghz = float(row.get("peak_freq_ghz", 0.0))
-        filename = f"{ts}_{peak_power_db:.2f}dB_{peak_freq_ghz:.6f}GHz.png"
+        peak_power_token = f"{peak_power_db:.2f}".replace(".", "_")
+        peak_freq_token = f"{peak_freq_ghz:.6f}".replace(".", "_")
+        filename = f"{ts_token}_{peak_power_token}dB_{peak_freq_token}GHz.png"
         path = os.path.join(out_dir, filename)
 
         x_plot = xdata_hz / 1e9
@@ -237,6 +240,15 @@ class SpectrumWorker(threading.Thread):
             arduino, arduino_status = open_arduino()
         else:
             arduino, arduino_status = None, "Disabled"
+        arduino_cfg = {
+            "red_enabled": bool(args.get("arduino_red_enabled", True)),
+            "green_enabled": bool(args.get("arduino_green_enabled", True)),
+            "yellow_enabled": bool(args.get("arduino_yellow_enabled", True)),
+            "speaker_enabled": bool(args.get("arduino_speaker_enabled", True)),
+            "red_duration_ms": int(args.get("arduino_red_duration_ms", 300)),
+            "green_duration_ms": int(args.get("arduino_green_duration_ms", 300)),
+            "speaker_duration_ms": int(args.get("arduino_speaker_duration_ms", 300)),
+        }
         with self.data_lock:
             self.status["arduino"] = arduino_status
 
@@ -433,7 +445,7 @@ class SpectrumWorker(threading.Thread):
                                 y_range=y_range if y_range is not None else self.latest.get("y_range"),
                             )
 
-                    write_arduino(arduino, detections_found)
+                    write_arduino(arduino, detections_found, arduino_cfg)
                     with self.data_lock:
                         self.status["last_signal"] = "RED" if detections_found else "GREEN"
 
@@ -444,7 +456,8 @@ class SpectrumWorker(threading.Thread):
         except Exception:
             pass
         finally:
-            write_arduino(arduino, None)
+            write_arduino(arduino, None, arduino_cfg)
             with self.data_lock:
                 self.status["last_signal"] = "YELLOW"
             close_arduino(arduino)
+
