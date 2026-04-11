@@ -82,20 +82,28 @@ BLUETOOTH_SWEEP_FREQS = [
 def build_sweep_plan(
     modes: list[str],
     select_mode: str = "exact",
-    selected_freq_ghz: float | None = None,
-    selected_min_ghz: float | None = None,
-    selected_max_ghz: float | None = None,
+    selected_freq_ghz: float | list[float] | None = None,
+    selected_min_ghz: float | list[float] | None = None,
+    selected_max_ghz: float | list[float] | None = None,
 ) -> list[float]:
     if "select" in modes:
+        freqs: list[float] = []
         if select_mode == "range" and selected_min_ghz is not None and selected_max_ghz is not None:
-            start_hz = selected_min_ghz * 1e9
-            end_hz = selected_max_ghz * 1e9
-            freqs: list[float] = []
-            f = start_hz
-            while f <= end_hz + 1.0:
-                freqs.append(f)
-                f += SWEEP_STEP_HZ
-            return freqs if freqs else [start_hz]
+            min_values = selected_min_ghz if isinstance(selected_min_ghz, list) else [selected_min_ghz]
+            max_values = selected_max_ghz if isinstance(selected_max_ghz, list) else [selected_max_ghz]
+            for start_ghz, end_ghz in zip(min_values, max_values):
+                start_hz = start_ghz * 1e9
+                end_hz = end_ghz * 1e9
+                f = start_hz
+                while f <= end_hz + 1.0:
+                    freqs.append(f)
+                    f += SWEEP_STEP_HZ
+            if freqs:
+                return freqs
+            if min_values:
+                return [min_values[0] * 1e9]
+        if isinstance(selected_freq_ghz, list) and selected_freq_ghz:
+            return [freq * 1e9 for freq in selected_freq_ghz]
         if selected_freq_ghz is not None:
             return [selected_freq_ghz * 1e9]
 
@@ -144,6 +152,19 @@ def parse_sim_values(text: str) -> list[float]:
         if chunk.strip():
             items.append(float(chunk))
     return items
+
+
+def parse_freq_values_ghz(text: str, name: str) -> list[float]:
+    values = []
+    for chunk in str(text).replace(",", " ").split():
+        if chunk.strip():
+            try:
+                values.append(float(chunk))
+            except ValueError:
+                raise ValueError(f"{name} must contain only numbers.")
+    if not values:
+        raise ValueError(f"{name} must contain at least one number.")
+    return values
 
 
 app = dash.Dash(__name__)
@@ -220,10 +241,10 @@ def build_worker_settings(
     selected_max = None
     if "select" in modes:
         if select_mode == "range":
-            selected_min = parse_float(selected_min_ghz, "Selected min freq (GHz)")
-            selected_max = parse_float(selected_max_ghz, "Selected max freq (GHz)")
+            selected_min = parse_freq_values_ghz(selected_min_ghz, "Selected min freq (GHz)")
+            selected_max = parse_freq_values_ghz(selected_max_ghz, "Selected max freq (GHz)")
         else:
-            selected_freq = parse_float(selected_freq_ghz, "Selected freq (GHz)")
+            selected_freq = parse_freq_values_ghz(selected_freq_ghz, "Selected freq (GHz)")
 
     red_duration_ms = parse_int(arduino_red_duration_ms, "Red duration (ms)")
     green_duration_ms = parse_int(arduino_green_duration_ms, "Green duration (ms)")
@@ -268,8 +289,12 @@ def build_worker_settings(
     if settings["manual_y_enabled"] and settings["y_min"] >= settings["y_max"]:
         raise ValueError("Y min must be less than Y max.")
     if "select" in modes and select_mode == "range" and selected_min is not None and selected_max is not None:
-        if selected_min >= selected_max:
-            raise ValueError("Selected min freq must be less than selected max freq.")
+        paired_ranges = list(zip(selected_min, selected_max))
+        if not paired_ranges:
+            raise ValueError("Selected range must contain at least one min/max pair.")
+        for min_freq, max_freq in paired_ranges:
+            if min_freq >= max_freq:
+                raise ValueError("Each selected min freq must be less than its corresponding max freq.")
     if (
         settings["arduino_red_duration_ms"] < 0
         or settings["arduino_green_duration_ms"] < 0
