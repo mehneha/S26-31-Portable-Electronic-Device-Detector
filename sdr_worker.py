@@ -120,6 +120,7 @@ class SpectrumWorker(threading.Thread):
         self.detect_buffer = detect_buffer
         self.detect_lock = detect_lock
         self.data_lock = threading.Lock()
+        self.settings_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.latest = {
             "x": np.array([]),
@@ -132,7 +133,6 @@ class SpectrumWorker(threading.Thread):
         }
         self.noise_floor = None
         self.rescale_pending = True
-        self.last_logged_step_token = None
         self.manual_y_enabled = bool(settings.get("manual_y_enabled", False))
         self.manual_y_min = settings.get("y_min")
         self.manual_y_max = settings.get("y_max")
@@ -147,6 +147,14 @@ class SpectrumWorker(threading.Thread):
 
     def stop(self) -> None:
         self.stop_event.set()
+
+    def update_runtime_settings(self, settings: dict) -> None:
+        with self.settings_lock:
+            self.settings = dict(settings)
+
+    def get_runtime_settings(self) -> dict:
+        with self.settings_lock:
+            return dict(self.settings)
 
     def get_latest(self):
         with self.data_lock:
@@ -182,7 +190,7 @@ class SpectrumWorker(threading.Thread):
         return float(noise_floor_db), float(threshold_db)
 
     def run(self) -> None:
-        args = self.settings
+        args = self.get_runtime_settings()
         sim_offsets: list[float] = []
         sim_freqs: list[float] = []
 
@@ -240,6 +248,7 @@ class SpectrumWorker(threading.Thread):
             arduino, arduino_status = open_arduino()
         else:
             arduino, arduino_status = None, "Disabled"
+        arduino_enabled = bool(args.get("arduino_enabled", True))
         arduino_cfg = {
             "red_enabled": bool(args.get("arduino_red_enabled", True)),
             "green_enabled": bool(args.get("arduino_green_enabled", True)),
@@ -271,10 +280,53 @@ class SpectrumWorker(threading.Thread):
         current_range_idx = 0
         last_range_switch_time = time.time()
         range_switch_interval = args["scan_interval"]
-        logging_timer = 0
+        logging_timer = time.time()
+        interval_candidates: dict[int, dict] = {}
 
         try:
             while not self.stop_event.is_set():
+                new_args = self.get_runtime_settings()
+                args = new_args
+                self.manual_y_enabled = bool(args.get("manual_y_enabled", False))
+                self.manual_y_min = args.get("y_min")
+                self.manual_y_max = args.get("y_max")
+
+                if float(args["gain"]) != gain_factor:
+                    gain_factor = float(args["gain"])
+                    current_gain = gain_factor * (rx_freq / 1e9)
+                    if not args["sim_enabled"]:
+                        usrp.set_rx_gain(current_gain, args["channel"])
+
+                if not args["sim_enabled"]:
+                    try:
+                        if usrp.get_rx_antenna(args["channel"]) != args["ant"]:
+                            usrp.set_rx_antenna(args["ant"], args["channel"])
+                    except Exception:
+                        pass
+
+                if args["sim_enabled"]:
+                    sim_offsets, sim_freqs = split_sim_values(args["sim_values"], args["rate"])
+                if bool(args.get("arduino_enabled", True)) != arduino_enabled:
+                    if arduino_enabled:
+                        write_arduino(arduino, None, arduino_cfg)
+                        close_arduino(arduino)
+                        arduino = None
+                        arduino_status = "Disabled"
+                    else:
+                        arduino, arduino_status = open_arduino()
+                    arduino_enabled = bool(args.get("arduino_enabled", True))
+                    with self.data_lock:
+                        self.status["arduino"] = arduino_status
+                arduino_cfg = {
+                    "red_enabled": bool(args.get("arduino_red_enabled", True)),
+                    "green_enabled": bool(args.get("arduino_green_enabled", True)),
+                    "yellow_enabled": bool(args.get("arduino_yellow_enabled", True)),
+                    "speaker_enabled": bool(args.get("arduino_speaker_enabled", True)),
+                    "red_duration_ms": int(args.get("arduino_red_duration_ms", 300)),
+                    "green_duration_ms": int(args.get("arduino_green_duration_ms", 300)),
+                    "speaker_duration_ms": int(args.get("arduino_speaker_duration_ms", 300)),
+                }
+
                 sweep_plan = args["sweep_plan"]
 
                 current_freq_idx = None
@@ -365,12 +417,9 @@ class SpectrumWorker(threading.Thread):
                     y_range = [float(self.manual_y_min), float(self.manual_y_max)]
                     self.rescale_pending = False
                 elif self.rescale_pending:
-                    y_max = float(np.max(ydata))
-                    y_min = float(np.min(ydata))
-                    if np.isfinite(y_max) and np.isfinite(y_min):
-                        upper = y_max + 3.0
-                        margin_db = 5.0
-                        lower = noise_floor_db - margin_db
+                    if np.isfinite(noise_floor_db):
+                        lower = noise_floor_db - 10.0
+                        upper = noise_floor_db + 30.0
                         y_range = [lower, upper]
                     self.rescale_pending = False
 
@@ -384,72 +433,87 @@ class SpectrumWorker(threading.Thread):
                     self.latest["threshold_db"] = threshold_db
                     self.latest["thresh_offset_db"] = float(args["thresh_offset"])
 
-                if time.time() - logging_timer > args["detect_interval"]:
-                    step_token = (current_range_idx, last_range_switch_time)
-                    if step_token == self.last_logged_step_token:
-                        logging_timer = time.time()
+                min_peak_height = threshold_db
+                # Temporarily disable minimum peak spacing so close peaks are not suppressed.
+                min_distance_samples = 1
+
+                if HAS_SCIPY:
+                    peak_indices, _ = find_peaks(ydata, height=min_peak_height, distance=min_distance_samples)
+                else:
+                    peak_indices = find_peaks_simple(
+                        ydata, min_height=min_peak_height, min_distance=min_distance_samples
+                    )
+
+                detections_found = False
+                for peak_idx in peak_indices:
+                    peak_freq_hz = float(xdata[peak_idx])
+
+                    is_above, max_power_in_range, _ = check_frequency_range_above_threshold(
+                        xdata, ydata, peak_freq_hz, args["detect_bw"], threshold_db
+                    )
+
+                    if not is_above:
                         continue
-                    min_peak_height = threshold_db
-                    # Temporarily disable minimum peak spacing so close peaks are not suppressed.
-                    min_distance_samples = 1
 
-                    if HAS_SCIPY:
-                        peak_indices, _ = find_peaks(ydata, height=min_peak_height, distance=min_distance_samples)
-                    else:
-                        peak_indices = find_peaks_simple(
-                            ydata, min_height=min_peak_height, min_distance=min_distance_samples
-                        )
+                    detections_found = True
+                    bw_6db = estimate_peak_bandwidth_hz(xdata, ydata, peak_idx, drop_db=6.0)
+                    band = classify_band(peak_freq_hz, bw_hz=bw_6db)
 
-                    detections_found = False
-                    detections = []
-                    for peak_idx in peak_indices:
-                        peak_freq_hz = float(xdata[peak_idx])
+                    ts = datetime.now()
+                    row = {
+                        "id": f"{ts.isoformat(timespec='seconds')}_{int(round(peak_freq_hz))}",
+                        "timestamp": ts.isoformat(timespec="seconds"),
+                        "peak_freq_label": _format_freq(peak_freq_hz),
+                        "peak_freq_ghz": round(float(peak_freq_hz) / 1e9, 5),
+                        "peak_power_db": round(float(max_power_in_range), 2),
+                        "detection": band,
+                        "center_freq_label": _format_freq(rx_freq),
+                        "center_freq_ghz": round(float(rx_freq) / 1e9, 5),
+                        "rx_gain_db": round(float(current_gain), 2),
+                        "false_positive": "No",
+                    }
 
-                        is_above, max_power_in_range, _ = check_frequency_range_above_threshold(
-                            xdata, ydata, peak_freq_hz, args["detect_bw"], threshold_db
-                        )
+                    # Deduplicate within the interval by approximate signal frequency,
+                    # independent of the current sweep step. Keep the strongest hit.
+                    bucket_width_hz = max(float(args["detect_bw"]), 1.0)
+                    bucket_key = int(round(peak_freq_hz / bucket_width_hz))
+                    prev = interval_candidates.get(bucket_key)
+                    if prev is None or max_power_in_range > prev["power"]:
+                        interval_candidates[bucket_key] = {
+                            "power": float(max_power_in_range),
+                            "row": row,
+                            "xdata": xdata.copy(),
+                            "ydata": ydata.copy(),
+                            "threshold_db": float(threshold_db),
+                            "y_range": (
+                                y_range[:] if y_range is not None else self.latest.get("y_range")
+                            ),
+                        }
 
-                        if is_above:
-                            detections_found = True
-                            bw_6db = estimate_peak_bandwidth_hz(xdata, ydata, peak_idx, drop_db=6.0)
-                            band = classify_band(peak_freq_hz, bw_hz=bw_6db)
+                write_arduino(arduino, detections_found, arduino_cfg)
+                with self.data_lock:
+                    self.status["last_signal"] = "RED" if detections_found else "GREEN"
 
-                            ts = datetime.now()
-                            row = {
-                                "id": f"{ts.isoformat(timespec='seconds')}_{int(round(peak_freq_hz))}",
-                                "timestamp": ts.isoformat(timespec="seconds"),
-                                "peak_freq_label": _format_freq(peak_freq_hz),
-                                "peak_freq_ghz": round(float(peak_freq_hz) / 1e9, 5),
-                                "peak_power_db": round(float(max_power_in_range), 2),
-                                "detection": band,
-                                "center_freq_label": _format_freq(rx_freq),
-                                "center_freq_ghz": round(float(rx_freq) / 1e9, 5),
-                                "rx_gain_db": float(current_gain),
-                                "false_positive": "No",
-                            }
-                            detections.append((max_power_in_range, row))
+                if time.time() - logging_timer >= args["detect_interval"]:
+                    if interval_candidates:
+                        selected = sorted(
+                            interval_candidates.values(),
+                            key=lambda item: item["power"],
+                            reverse=True,
+                        )[:2]
+                        selected.sort(key=lambda item: item["row"]["peak_freq_ghz"])
 
-                    if detections:
-                        detections.sort(key=lambda item: item[1]["peak_freq_ghz"])
-                        selected = [detections[0]]
-                        if len(detections) > 1:
-                            selected.append(detections[-1])
-
-                        for power, row in selected:
-                            self.log_detection(row)
+                        for item in selected:
+                            self.log_detection(item["row"])
                             _save_detection_snapshot(
-                                xdata_hz=xdata,
-                                ydata_db=ydata,
-                                row=row,
-                                threshold_db=threshold_db,
-                                y_range=y_range if y_range is not None else self.latest.get("y_range"),
+                                xdata_hz=item["xdata"],
+                                ydata_db=item["ydata"],
+                                row=item["row"],
+                                threshold_db=item["threshold_db"],
+                                y_range=item["y_range"],
                             )
 
-                    write_arduino(arduino, detections_found, arduino_cfg)
-                    with self.data_lock:
-                        self.status["last_signal"] = "RED" if detections_found else "GREEN"
-
-                    self.last_logged_step_token = step_token
+                    interval_candidates.clear()
                     logging_timer = time.time()
 
                 time.sleep(0.02)
@@ -460,4 +524,3 @@ class SpectrumWorker(threading.Thread):
             with self.data_lock:
                 self.status["last_signal"] = "YELLOW"
             close_arduino(arduino)
-

@@ -34,23 +34,23 @@ def estimate_peak_bandwidth_hz(
 def classify_band(freq_hz: float, bw_hz: Optional[float] = None) -> str:
     """
     Classify into one of:
-      - 'Wi-Fi 2.4 GHz'
-      - 'Bluetooth (2.4 GHz)'
-      - 'Wi-Fi 5 GHz'
+      - 'Wi-Fi'
+      - 'Bluetooth'
+      - 'Wi-Fi'
       - 'Cellular'
       - 'Other'
     """
     f = float(freq_hz)
 
-    if 2.400e9 <= f <= 2.4835e9:
+    if 2.200e9 < f <= 2.4835e9:
         if bw_hz is not None and bw_hz < 5e6:
-            return "Bluetooth (2.4 GHz)"
-        return "Wi-Fi 2.4 GHz"
+            return "Bluetooth"
+        return "Wi-Fi"
 
     if 5.150e9 <= f <= 5.925e9:
-        return "Wi-Fi 5 GHz"
+        return "Wi-Fi"
 
-    if (700e6 <= f <= 960e6) or (1.710e9 <= f <= 2.170e9) or (2.300e9 <= f <= 2.700e9):
+    if (700e6 <= f <= 960e6) or (1.710e9 <= f <= 2.200e9) or (2.300e9 <= f <= 2.700e9):
         return "Cellular"
 
     return "Other"

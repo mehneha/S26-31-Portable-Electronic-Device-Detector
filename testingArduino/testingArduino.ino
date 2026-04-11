@@ -4,6 +4,12 @@ int yellowLED = 9;
 int buzzer = 2;
 String input = "";
 
+void applyIdleLights(bool yellowEnabled) {
+  digitalWrite(redLED, LOW);
+  digitalWrite(greenLED, LOW);
+  digitalWrite(yellowLED, yellowEnabled ? HIGH : LOW);
+}
+
 String getToken(const String& s, int index) {
   int start = 0;
   int tokenIndex = 0;
@@ -29,20 +35,17 @@ void applyLegacyState(const String& state) {
     tone(buzzer, 1000);
     delay(300);
     noTone(buzzer);
+    applyIdleLights(true);
   } else if (state == "GREEN") {
     digitalWrite(yellowLED, LOW);
     digitalWrite(redLED, LOW);
     digitalWrite(greenLED, HIGH);
     noTone(buzzer);
   } else if (state == "YELLOW") {
-    digitalWrite(yellowLED, HIGH);
-    digitalWrite(redLED, LOW);
-    digitalWrite(greenLED, LOW);
+    applyIdleLights(true);
     noTone(buzzer);
   } else {
-    digitalWrite(yellowLED, HIGH);
-    digitalWrite(redLED, LOW);
-    digitalWrite(greenLED, LOW);
+    applyIdleLights(true);
     noTone(buzzer);
   }
 }
@@ -72,9 +75,9 @@ void loop() {
       speakerDuration = min(speakerDuration, redDuration);
 
       if (state == "RED") {
-        digitalWrite(yellowLED, LOW);
-        digitalWrite(redLED, redEnabled ? HIGH : LOW);
         digitalWrite(greenLED, LOW);
+        digitalWrite(redLED, redEnabled ? HIGH : LOW);
+        digitalWrite(yellowLED, redEnabled ? LOW : (yellowEnabled ? HIGH : LOW));
 
         if (speakerEnabled) {
           tone(buzzer, 1000);
@@ -91,23 +94,19 @@ void loop() {
         if (redRemainder > 0) {
           delay(redRemainder);
         }
-        if (redEnabled) {
-          digitalWrite(redLED, LOW);
-        }
+        applyIdleLights(yellowEnabled);
 
       } else if (state == "GREEN") {
-        digitalWrite(yellowLED, LOW);
         digitalWrite(redLED, LOW);
         digitalWrite(greenLED, greenEnabled ? HIGH : LOW);
+        digitalWrite(yellowLED, greenEnabled ? LOW : (yellowEnabled ? HIGH : LOW));
         noTone(buzzer);
         if (greenEnabled && greenDuration > 0) {
           delay(greenDuration);
-          digitalWrite(greenLED, LOW);
         }
+        applyIdleLights(yellowEnabled);
       } else {
-        digitalWrite(yellowLED, yellowEnabled ? HIGH : LOW);
-        digitalWrite(redLED, LOW);
-        digitalWrite(greenLED, LOW);
+        applyIdleLights(yellowEnabled);
         noTone(buzzer);
       }
     } else {

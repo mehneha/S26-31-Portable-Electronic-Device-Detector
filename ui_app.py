@@ -36,7 +36,7 @@ except Exception:
 
 # Fixed config.
 SWEEP_START_HZ = 650e6
-SWEEP_END_HZ = 2.0e9
+SWEEP_END_HZ = 6.0e9
 SWEEP_STEP_HZ = 40e6
 EXCLUDED_RANGES_HZ = [
     (2.0e9, 3.0e9),
@@ -176,6 +176,110 @@ def load_logo_data_uri(image_path: str) -> str | None:
 LOGO_DATA_URI = load_logo_data_uri("ZetaLogo.jpeg")
 
 
+def restart_worker(settings: dict | None) -> None:
+    global worker
+    if worker is not None:
+        worker.stop()
+        worker.join(timeout=1.0)
+        worker = None
+    if settings is not None:
+        worker = SpectrumWorker(settings, detect_buffer, detect_lock)
+        worker.start()
+
+
+def build_worker_settings(
+    ant,
+    gain,
+    thresh_offset,
+    scan_interval,
+    detect_interval,
+    manual_y_enabled,
+    y_min,
+    y_max,
+    sim_enabled_values,
+    sim_tones,
+    arduino_enabled_values,
+    arduino_red_values,
+    arduino_green_values,
+    arduino_yellow_values,
+    arduino_speaker_values,
+    arduino_red_duration_ms,
+    arduino_green_duration_ms,
+    arduino_speaker_duration_ms,
+    scan_modes,
+    select_range_mode,
+    selected_freq_ghz,
+    selected_min_ghz,
+    selected_max_ghz,
+):
+    modes = scan_modes or ["all"]
+    select_mode = "range" if "range" in (select_range_mode or []) else "exact"
+
+    selected_freq = None
+    selected_min = None
+    selected_max = None
+    if "select" in modes:
+        if select_mode == "range":
+            selected_min = parse_float(selected_min_ghz, "Selected min freq (GHz)")
+            selected_max = parse_float(selected_max_ghz, "Selected max freq (GHz)")
+        else:
+            selected_freq = parse_float(selected_freq_ghz, "Selected freq (GHz)")
+
+    red_duration_ms = parse_int(arduino_red_duration_ms, "Red duration (ms)")
+    green_duration_ms = parse_int(arduino_green_duration_ms, "Green duration (ms)")
+    speaker_duration_ms = parse_int(arduino_speaker_duration_ms, "Speaker duration (ms)")
+    if speaker_duration_ms > red_duration_ms:
+        speaker_duration_ms = red_duration_ms
+
+    settings = {
+        "usrp_args": DEFAULT_USRP_ARGS,
+        "ant": ant or "TX/RX",
+        "freq": DEFAULT_CENTER_FREQ,
+        "rate": DEFAULT_SAMPLE_RATE,
+        "gain": parse_int(gain, "Gain"),
+        "channel": DEFAULT_CHANNEL,
+        "nsamps": DEFAULT_NSAMPS,
+        "thresh_offset": parse_float(thresh_offset, "Threshold offset"),
+        "detect_bw": DEFAULT_DETECT_BW,
+        "scan_interval": parse_float(scan_interval, "Scan interval"),
+        "detect_interval": parse_float(detect_interval, "Detection interval"),
+        "manual_y_enabled": "manual" in (manual_y_enabled or []),
+        "y_min": parse_float(y_min, "Y min"),
+        "y_max": parse_float(y_max, "Y max"),
+        "sweep_plan": build_sweep_plan(
+            modes,
+            select_mode=select_mode,
+            selected_freq_ghz=selected_freq,
+            selected_min_ghz=selected_min,
+            selected_max_ghz=selected_max,
+        ),
+        "sim_enabled": "sim" in (sim_enabled_values or []),
+        "sim_values": parse_sim_values(sim_tones or ""),
+        "arduino_enabled": "ardu" in (arduino_enabled_values or []),
+        "arduino_red_enabled": "red" in (arduino_red_values or []),
+        "arduino_green_enabled": "green" in (arduino_green_values or []),
+        "arduino_yellow_enabled": "yellow" in (arduino_yellow_values or []),
+        "arduino_speaker_enabled": "speaker" in (arduino_speaker_values or []),
+        "arduino_red_duration_ms": red_duration_ms,
+        "arduino_green_duration_ms": green_duration_ms,
+        "arduino_speaker_duration_ms": speaker_duration_ms,
+    }
+
+    if settings["manual_y_enabled"] and settings["y_min"] >= settings["y_max"]:
+        raise ValueError("Y min must be less than Y max.")
+    if "select" in modes and select_mode == "range" and selected_min is not None and selected_max is not None:
+        if selected_min >= selected_max:
+            raise ValueError("Selected min freq must be less than selected max freq.")
+    if (
+        settings["arduino_red_duration_ms"] < 0
+        or settings["arduino_green_duration_ms"] < 0
+        or settings["arduino_speaker_duration_ms"] < 0
+    ):
+        raise ValueError("Arduino durations must be >= 0.")
+
+    return settings
+
+
 app.layout = html.Div(
     [
         html.Div(
@@ -211,24 +315,24 @@ app.layout = html.Div(
                                     ],
                                     style={"display": "flex", "alignItems": "center", "marginTop": "6px"},
                                 ),
-                                html.Div(
-                                    id="select-exact-input-container",
-                                    children=[
-                                        html.Label("Selected freq (GHz)"),
-                                        dcc.Input(id="selected-freq-ghz", type="text", value="2.42", style={"width": "100%"}),
-                                    ],
-                                    style={"display": "block"},
-                                ),
-                                html.Div(
-                                    id="select-range-input-container",
-                                    children=[
-                                        html.Label("Selected min freq (GHz)"),
-                                        dcc.Input(id="selected-min-ghz", type="text", value="0.65", style={"width": "100%"}),
-                                        html.Label("Selected max freq (GHz)"),
-                                        dcc.Input(id="selected-max-ghz", type="text", value="6.0", style={"width": "100%"}),
-                                    ],
-                                    style={"display": "none"},
-                                ),
+                                        html.Div(
+                                            id="select-exact-input-container",
+                                            children=[
+                                                html.Label("Selected freq (GHz)"),
+                                                dcc.Input(id="selected-freq-ghz", type="text", value="2.42", debounce=True, style={"width": "100%"}),
+                                            ],
+                                            style={"display": "block"},
+                                        ),
+                                        html.Div(
+                                            id="select-range-input-container",
+                                            children=[
+                                                html.Label("Selected min freq (GHz)"),
+                                                dcc.Input(id="selected-min-ghz", type="text", value="0.65", debounce=True, style={"width": "100%"}),
+                                                html.Label("Selected max freq (GHz)"),
+                                                dcc.Input(id="selected-max-ghz", type="text", value="6.0", debounce=True, style={"width": "100%"}),
+                                            ],
+                                            style={"display": "none"},
+                                        ),
                             ],
                             style={"display": "none"},
                         ),
@@ -254,13 +358,13 @@ app.layout = html.Div(
                                             value="TX/RX",
                                         ),
                                         html.Label("Gain factor"),
-                                        dcc.Input(id="gain", type="text", value="10", style={"width": "100%"}),
+                                        dcc.Input(id="gain", type="text", value="10", debounce=True, style={"width": "100%"}),
                                         html.Label("Threshold offset (dB)"),
-                                        dcc.Input(id="thresh-offset", type="text", value="11.0", style={"width": "100%"}),
+                                        dcc.Input(id="thresh-offset", type="text", value="11.0", debounce=True, style={"width": "100%"}),
                                         html.Label("Scan interval (s)"),
-                                        dcc.Input(id="scan-interval", type="text", value="60", style={"width": "100%"}),
+                                        dcc.Input(id="scan-interval", type="text", value="80", debounce=True, style={"width": "100%"}),
                                         html.Label("Detection interval (s)"),
-                                        dcc.Input(id="detect-interval", type="text", value="0.2", style={"width": "100%"}),
+                                        dcc.Input(id="detect-interval", type="text", value="0.2", debounce=True, style={"width": "100%"}),
                                         dcc.Checklist(
                                             id="manual-y-enabled",
                                             options=[{"label": "Manual Y range", "value": "manual"}],
@@ -270,9 +374,9 @@ app.layout = html.Div(
                                             id="manual-y-inputs",
                                             children=[
                                                 html.Label("Y max (dB)"),
-                                                dcc.Input(id="y-max", type="text", value="-110", style={"width": "100%"}),
+                                                dcc.Input(id="y-max", type="text", value="-110", debounce=True, style={"width": "100%"}),
                                                 html.Label("Y min (dB)"),
-                                                dcc.Input(id="y-min", type="text", value="-140", style={"width": "100%"}),
+                                                dcc.Input(id="y-min", type="text", value="-140", debounce=True, style={"width": "100%"}),
                                             ],
                                             style={"display": "none", "marginTop": "6px"},
                                         ),
@@ -306,7 +410,7 @@ app.layout = html.Div(
                                                     id="arduino-red-duration-container",
                                                     children=[
                                                         html.Label("Red duration (ms)"),
-                                                        dcc.Input(id="arduino-red-duration-ms", type="text", value="300", debounce=True, style={"width": "100%"}),
+                                                        dcc.Input(id="arduino-red-duration-ms", type="text", value="1200", debounce=True, style={"width": "100%"}),
                                                     ],
                                                     style={"display": "block"},
                                                 ),
@@ -319,7 +423,7 @@ app.layout = html.Div(
                                                     id="arduino-green-duration-container",
                                                     children=[
                                                         html.Label("Green duration (ms)"),
-                                                        dcc.Input(id="arduino-green-duration-ms", type="text", value="300", style={"width": "100%"}),
+                                                        dcc.Input(id="arduino-green-duration-ms", type="text", value="1200", debounce=True, style={"width": "100%"}),
                                                     ],
                                                     style={"display": "block"},
                                                 ),
@@ -692,82 +796,142 @@ def on_control(
 
     if trigger_id == "stop-btn":
         with worker_lock:
-            if worker is not None:
-                worker.stop()
-                worker = None
+            restart_worker(None)
         return "", "stopped"
 
     try:
-        modes = scan_modes or ["all"]
-        select_mode = "range" if "range" in (select_range_mode or []) else "exact"
-
-        selected_freq = None
-        selected_min = None
-        selected_max = None
-        if "select" in modes:
-            if select_mode == "range":
-                selected_min = parse_float(selected_min_ghz, "Selected min freq (GHz)")
-                selected_max = parse_float(selected_max_ghz, "Selected max freq (GHz)")
-            else:
-                selected_freq = parse_float(selected_freq_ghz, "Selected freq (GHz)")
-
-        red_duration_ms = parse_int(arduino_red_duration_ms, "Red duration (ms)")
-        green_duration_ms = parse_int(arduino_green_duration_ms, "Green duration (ms)")
-        speaker_duration_ms = parse_int(arduino_speaker_duration_ms, "Speaker duration (ms)")
-        if speaker_duration_ms > red_duration_ms:
-            speaker_duration_ms = red_duration_ms
-
-        settings = {
-            "usrp_args": DEFAULT_USRP_ARGS,
-            "ant": ant or "TX/RX",
-            "freq": DEFAULT_CENTER_FREQ,
-            "rate": DEFAULT_SAMPLE_RATE,
-            "gain": parse_int(gain, "Gain"),
-            "channel": DEFAULT_CHANNEL,
-            "nsamps": DEFAULT_NSAMPS,
-            "thresh_offset": parse_float(thresh_offset, "Threshold offset"),
-            "detect_bw": DEFAULT_DETECT_BW,
-            "scan_interval": parse_float(scan_interval, "Scan interval"),
-            "detect_interval": parse_float(detect_interval, "Detection interval"),
-            "manual_y_enabled": "manual" in (manual_y_enabled or []),
-            "y_min": parse_float(y_min, "Y min"),
-            "y_max": parse_float(y_max, "Y max"),
-            "sweep_plan": build_sweep_plan(
-                modes,
-                select_mode=select_mode,
-                selected_freq_ghz=selected_freq,
-                selected_min_ghz=selected_min,
-                selected_max_ghz=selected_max,
-            ),
-            "sim_enabled": "sim" in (sim_enabled_values or []),
-            "sim_values": parse_sim_values(sim_tones or ""),
-            "arduino_enabled": "ardu" in (arduino_enabled_values or []),
-            "arduino_red_enabled": "red" in (arduino_red_values or []),
-            "arduino_green_enabled": "green" in (arduino_green_values or []),
-            "arduino_yellow_enabled": "yellow" in (arduino_yellow_values or []),
-            "arduino_speaker_enabled": "speaker" in (arduino_speaker_values or []),
-            "arduino_red_duration_ms": red_duration_ms,
-            "arduino_green_duration_ms": green_duration_ms,
-            "arduino_speaker_duration_ms": speaker_duration_ms,
-        }
+        settings = build_worker_settings(
+            ant,
+            gain,
+            thresh_offset,
+            scan_interval,
+            detect_interval,
+            manual_y_enabled,
+            y_min,
+            y_max,
+            sim_enabled_values,
+            sim_tones,
+            arduino_enabled_values,
+            arduino_red_values,
+            arduino_green_values,
+            arduino_yellow_values,
+            arduino_speaker_values,
+            arduino_red_duration_ms,
+            arduino_green_duration_ms,
+            arduino_speaker_duration_ms,
+            scan_modes,
+            select_range_mode,
+            selected_freq_ghz,
+            selected_min_ghz,
+            selected_max_ghz,
+        )
     except ValueError as exc:
         return str(exc), dash.no_update
 
-    if settings["manual_y_enabled"] and settings["y_min"] >= settings["y_max"]:
-        return "Y min must be less than Y max.", dash.no_update
-    if "select" in (scan_modes or []) and "range" in (select_range_mode or []) and selected_min is not None and selected_max is not None:
-        if selected_min >= selected_max:
-            return "Selected min freq must be less than selected max freq.", dash.no_update
-    if settings["arduino_red_duration_ms"] < 0 or settings["arduino_green_duration_ms"] < 0 or settings["arduino_speaker_duration_ms"] < 0:
-        return "Arduino durations must be >= 0.", dash.no_update
-
     with worker_lock:
-        if worker is not None:
-            worker.stop()
-        worker = SpectrumWorker(settings, detect_buffer, detect_lock)
-        worker.start()
+        restart_worker(settings)
 
     return "", "running"
+
+
+@app.callback(
+    Output("error", "children", allow_duplicate=True),
+    Input("ant", "value"),
+    Input("gain", "value"),
+    Input("thresh-offset", "value"),
+    Input("scan-interval", "value"),
+    Input("detect-interval", "value"),
+    Input("manual-y-enabled", "value"),
+    Input("y-min", "value"),
+    Input("y-max", "value"),
+    Input("sim-enabled", "value"),
+    Input("sim-tones", "value"),
+    Input("arduino-enabled", "value"),
+    Input("arduino-red-enabled", "value"),
+    Input("arduino-green-enabled", "value"),
+    Input("arduino-yellow-enabled", "value"),
+    Input("arduino-speaker-enabled", "value"),
+    Input("arduino-red-duration-ms", "value"),
+    Input("arduino-green-duration-ms", "value"),
+    Input("arduino-speaker-duration-ms", "value"),
+    Input("scan-modes", "data"),
+    Input("select-range-mode", "value"),
+    Input("selected-freq-ghz", "value"),
+    Input("selected-min-ghz", "value"),
+    Input("selected-max-ghz", "value"),
+    State("run-state", "data"),
+    prevent_initial_call=True,
+)
+def apply_live_settings(
+    ant,
+    gain,
+    thresh_offset,
+    scan_interval,
+    detect_interval,
+    manual_y_enabled,
+    y_min,
+    y_max,
+    sim_enabled_values,
+    sim_tones,
+    arduino_enabled_values,
+    arduino_red_values,
+    arduino_green_values,
+    arduino_yellow_values,
+    arduino_speaker_values,
+    arduino_red_duration_ms,
+    arduino_green_duration_ms,
+    arduino_speaker_duration_ms,
+    scan_modes,
+    select_range_mode,
+    selected_freq_ghz,
+    selected_min_ghz,
+    selected_max_ghz,
+    run_state,
+):
+    if run_state != "running":
+        return dash.no_update
+
+    with worker_lock:
+        active_worker = worker
+
+    if active_worker is None:
+        return dash.no_update
+
+    try:
+        settings = build_worker_settings(
+            ant,
+            gain,
+            thresh_offset,
+            scan_interval,
+            detect_interval,
+            manual_y_enabled,
+            y_min,
+            y_max,
+            sim_enabled_values,
+            sim_tones,
+            arduino_enabled_values,
+            arduino_red_values,
+            arduino_green_values,
+            arduino_yellow_values,
+            arduino_speaker_values,
+            arduino_red_duration_ms,
+            arduino_green_duration_ms,
+            arduino_speaker_duration_ms,
+            scan_modes,
+            select_range_mode,
+            selected_freq_ghz,
+            selected_min_ghz,
+            selected_max_ghz,
+        )
+    except ValueError as exc:
+        return str(exc)
+
+    current_settings = active_worker.get_runtime_settings()
+    if bool(current_settings.get("sim_enabled", False)) != bool(settings.get("sim_enabled", False)):
+        return "Changing simulation mode while running still requires Stop then Start."
+
+    active_worker.update_runtime_settings(settings)
+    return ""
 
 
 @app.callback(
