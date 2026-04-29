@@ -1,4 +1,3 @@
-# Simulation helpers extracted from sdr_worker.py
 from __future__ import annotations
 
 import numpy as np

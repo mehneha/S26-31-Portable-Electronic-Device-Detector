@@ -1,9 +1,7 @@
-# Welch/PSD utilities extracted from rx_spectrum_web.py
 from typing import Optional, Tuple
 
 import numpy as np
 
-# Optional scipy for peak finding and Welch's method. Falls back to simple method if not present.
 try:
     from scipy.signal import find_peaks, welch
     HAS_SCIPY = True
@@ -12,7 +10,6 @@ except ImportError:
     welch = None
     find_peaks = None
 
-# Fixed Welch defaults.
 WELCH_NPERSEG_DEFAULT = 4096
 WELCH_NOVERLAP_DEFAULT = 2048
 
@@ -24,12 +21,6 @@ def compute_welch_psd(
     nperseg: Optional[int] = None,
     noverlap: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Compute the Power Spectral Density using Welch's method.
-
-    Uses scipy.signal.welch when available; otherwise performs a manual Welch
-    estimate matching the MATLAB style (Hann window, 50% overlap default).
-    """
     if nfft is None:
         nfft = len(samples)
 
@@ -98,9 +89,6 @@ def calculate_noise_floor_welch(
     nperseg: Optional[int] = None,
     noverlap: Optional[int] = None,
 ) -> float:
-    """
-    Calculate noise floor using Welch's method for better noise estimation.
-    """
     if len(samples) == 0:
         return -100.0
 

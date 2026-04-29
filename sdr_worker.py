@@ -1,4 +1,3 @@
-# SDR worker and detection loop extracted from rx_spectrum_web.py
 import os
 import threading
 import time
@@ -434,7 +433,6 @@ class SpectrumWorker(threading.Thread):
                     self.latest["thresh_offset_db"] = float(args["thresh_offset"])
 
                 min_peak_height = threshold_db
-                # Temporarily disable minimum peak spacing so close peaks are not suppressed.
                 min_distance_samples = 1
 
                 if HAS_SCIPY:
@@ -473,8 +471,6 @@ class SpectrumWorker(threading.Thread):
                         "false_positive": "No",
                     }
 
-                    # Deduplicate within the interval by approximate signal frequency,
-                    # independent of the current sweep step. Keep the strongest hit.
                     bucket_width_hz = max(float(args["detect_bw"]), 1.0)
                     bucket_key = int(round(peak_freq_hz / bucket_width_hz))
                     prev = interval_candidates.get(bucket_key)

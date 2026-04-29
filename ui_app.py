@@ -1,14 +1,4 @@
 #!/usr/bin/env python3
-#
-# Copyright 2025 Ettus Research, a National Instruments Brand
-#
-# SPDX-License-Identifier: GPL-3.0-or-later
-#
-"""Dash web UI for spectrum display and detection (split modules).
-
-Run:
-  python ui_app.py
-"""
 
 import argparse
 import base64
@@ -34,14 +24,10 @@ try:
 except Exception:
     pd = None
 
-# Fixed config.
 SWEEP_START_HZ = 650e6
 SWEEP_END_HZ = 6.0e9
 SWEEP_STEP_HZ = 40e6
 EXCLUDED_RANGES_HZ = [
-    (2.0e9, 3.0e9),
-    (3.0e9, 4.8e9),
-    #(5.8e9, 6.0e9),
 ]
 DEFAULT_USRP_ARGS = ""
 DEFAULT_CENTER_FREQ = SWEEP_START_HZ

@@ -1,4 +1,3 @@
-# Helper functions
 from typing import Optional
 import time
 
@@ -13,7 +12,6 @@ except Exception:
 def estimate_peak_bandwidth_hz(
     xdata: np.ndarray, ydata: np.ndarray, peak_idx: int, drop_db: float = 6.0
 ) -> float:
-    """Rough occupied bandwidth estimate using -drop_db points around the peak."""
     peak = float(ydata[peak_idx])
     floor = peak - float(drop_db)
 
@@ -32,14 +30,6 @@ def estimate_peak_bandwidth_hz(
 
 
 def classify_band(freq_hz: float, bw_hz: Optional[float] = None) -> str:
-    """
-    Classify into one of:
-      - 'Wi-Fi'
-      - 'Bluetooth'
-      - 'Wi-Fi'
-      - 'Cellular'
-      - 'Other'
-    """
     f = float(freq_hz)
 
     if 2.200e9 < f <= 2.4835e9:
@@ -63,9 +53,6 @@ def check_frequency_range_above_threshold(
     bandwidth_hz: float,
     threshold_db: float,
 ) -> tuple[bool, float, int]:
-    """
-    Check if a frequency range has power above threshold.
-    """
     if len(xdata) == 0 or len(ydata) == 0:
         return False, -100.0, -1
 
@@ -88,9 +75,6 @@ def check_frequency_range_above_threshold(
 
 
 def find_peaks_simple(ydata: np.ndarray, min_height: float, min_distance: int = 10) -> np.ndarray:
-    """
-    Simple peak finding algorithm (fallback when scipy is not available).
-    """
     peaks = []
     n = len(ydata)
 
@@ -107,7 +91,6 @@ def open_arduino(port: str = "COM5", baud: int = 9600):
         return None, "pyserial not installed"
     try:
         arduino = serial.Serial(port, baud, timeout=0.2, write_timeout=0.2)
-        # Allow board auto-reset on serial open to finish before first command.
         time.sleep(2.0)
         try:
             arduino.reset_input_buffer()
@@ -149,7 +132,6 @@ def write_arduino(arduino, detected: bool | None, cfg: Optional[dict] = None) ->
             state = "YELLOW"
         else:
             state = "GREEN"
-        # Backward-compatible CSV command. Legacy sketches may ignore this.
         cmd = (
             f"CFG,{state},{red_enabled},{green_enabled},{yellow_enabled},"
             f"{speaker_enabled},{red_duration_ms},{green_duration_ms},{speaker_duration_ms}\n"
